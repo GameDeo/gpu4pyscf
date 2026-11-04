@@ -26,12 +26,12 @@ def main():
     mf.conv_tol = 1e-9
     mf.kernel()
     g = mf.nuc_grad_method()
-    g.verbose = 5
+    g.verbose = 6
     g.kernel()  # warm
     cupy.cuda.Stream.null.synchronize()
     with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU]) as prof:
         t0 = time.perf_counter()
-        g.verbose = 5
+        g.verbose = 6
         g.kernel()
         cupy.cuda.Stream.null.synchronize()
         wall = time.perf_counter() - t0

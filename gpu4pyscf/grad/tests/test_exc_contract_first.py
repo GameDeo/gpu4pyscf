@@ -74,6 +74,23 @@ class KnownValues(unittest.TestCase):
     def test_wb97mv(self):
         self._check('wb97m-v')
 
+    def test_crt_gemms(self):
+        '''XC-gradient GEMMs as INT8 residue GEMMs (needs sm_75+) vs FP64'''
+        mf = dft.RKS(mol, xc='wb97m-v').density_fit()
+        mf.grids.atom_grid = (50, 194)
+        mf.nlcgrids.atom_grid = (20, 50)
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        g0 = mf.nuc_grad_method().kernel()
+        rks_grad.XC_GRAD_CRT_MODULI = 12
+        try:
+            g1 = mf.nuc_grad_method().kernel()
+        finally:
+            rks_grad.XC_GRAD_CRT_MODULI = 0
+        d = float(np.abs(g1 - g0).max())
+        print(f'[wb97m-v] max|dgrad| CRT-12 vs FP64 = {d:.2e}')
+        self.assertLess(d, 1e-8)
+
 
 if __name__ == "__main__":
     print("Full Tests for contract-first XC gradient")

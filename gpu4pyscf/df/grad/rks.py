@@ -39,6 +39,7 @@ def energy_ee(ks_grad, mol=None, dm=None, verbose=None):
     #enabling range-separated hybrids
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=mol.spin)
 
+    from gpu4pyscf.scf import mixed_precision
     if ks_grad.grid_response:
         log.debug('Compute XC deriviatives with grid response')
         exc, exc1 = rks_grad.get_exc_full_response(
@@ -48,7 +49,8 @@ def energy_ee(ks_grad, mol=None, dm=None, verbose=None):
         exc1 *= 2
         exc1 += exc
     else:
-        exc, exc1 = rks_grad.get_exc(ni, mol, grids, mf.xc, dm, verbose=log)
+        with mixed_precision.grad_stage(mf):
+            exc, exc1 = rks_grad.get_exc(ni, mol, grids, mf.xc, dm, verbose=log)
         exc1 *= 2
     t0 = log.timer('vxc total', *t0)
 

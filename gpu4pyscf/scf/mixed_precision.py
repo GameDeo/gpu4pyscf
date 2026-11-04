@@ -257,3 +257,19 @@ def final_conv_tol_grad(mf):
     if tol is None:
         tol = mf.conv_tol**.5
     return tol * opt['final_grad_factor']
+
+
+@contextlib.contextmanager
+def grad_stage(mf):
+    '''Nuclear-gradient precision of the 'crt' scheme: the XC-gradient GEMMs run as INT8 residue GEMMs.'''
+    opt = get_options(getattr(mf, 'base', mf))
+    if opt['scheme'] != 'crt' or not getattr(getattr(mf, 'base', mf), 'mixed_precision', False):
+        yield
+        return
+    from gpu4pyscf.grad import rks as rks_grad
+    old = rks_grad.XC_GRAD_CRT_MODULI
+    rks_grad.XC_GRAD_CRT_MODULI = opt['crt_moduli_final']
+    try:
+        yield
+    finally:
+        rks_grad.XC_GRAD_CRT_MODULI = old

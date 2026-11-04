@@ -142,11 +142,22 @@ def _get_denlc(ks_grad, mol, dm):
 # one GEMM per term (5 for MGGA) and no [3, nao, nao] temporaries.  Set to True to use the legacy path.
 LEGACY_EXC_GRAD = False
 
+# Number of INT8 moduli for the two GEMMs of D x = C (C^T x) in the XC gradient (0: plain FP64).  Set by
+# gpu4pyscf.scf.mixed_precision.grad_stage for the 'crt' scheme.
+XC_GRAD_CRT_MODULI = 0
+
 def _apply_dm(dm_mask, x):
     '''D x, with D given as a matrix or as an occupied-orbital factor C (D = C C^T, applied as C (C^T x),
     which costs nocc/nao of the dense product).'''
     if isinstance(dm_mask, tuple):
         c = dm_mask[0]
+        if XC_GRAD_CRT_MODULI and x.dtype == cupy.float64 and x.flags.c_contiguous:
+            from gpu4pyscf.lib import crt_gemm
+            nsub, ng = x.shape
+            view = cupy.lib.stride_tricks.as_strided(x, shape=(1, ng, nsub), strides=(0, x.itemsize, ng * x.itemsize))
+            ct = cupy.ascontiguousarray(c.T)
+            tt, _ = crt_gemm.gemm_planes(view, ct, XC_GRAD_CRT_MODULI)     # (P1, nocc) = (C^T x)^T
+            return crt_gemm.gemm_nt(cupy.ascontiguousarray(c)[None], tt[:ng][None], XC_GRAD_CRT_MODULI)
         return c.dot(c.T.dot(x))
     return dm_mask.dot(x)
 
