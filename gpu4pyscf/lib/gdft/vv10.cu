@@ -98,6 +98,95 @@ static void vv10_fock_eval_UWE_kernel(double* __restrict__ U, double* __restrict
     }
 }
 
+
+/*
+ * Mixed-precision version of vv10_fock_eval_UWE_kernel.
+ *
+ * The O(N^2) pair loop runs in FP32 (the FP64 pipe is 1/32 (T4) .. 1/2 (A100/H100)
+ * of the FP32 rate, and this loop is pure FMA/RCP throughput).  Accuracy is retained by
+ *   - storing the coordinates as (hi, lo) float pairs, so the differences r_i - r_j keep ~FP48
+ *     relative accuracy independent of the distance from the origin;
+ *   - accumulating in short FP32 chunks that are flushed to FP64 accumulators; all terms of E, U
+ *     and W have the same sign so there is no cancellation;
+ *   - clamping g_ij, g_ji so g_ij*g_ji*g_sum can never overflow (the clamped terms are < 1e-36).
+ */
+#define VV10_CHUNK 16
+__global__
+static void vv10_fock_eval_UWE_fp32_kernel(double* __restrict__ U, double* __restrict__ W, double* __restrict__ E,
+                                           const double* __restrict__ grid_coord, const double* __restrict__ rho_weight,
+                                           const double* __restrict__ omega, const double* __restrict__ kappa,
+                                           const int ngrids)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool active = i < ngrids;
+
+    float omega_i = 0, kappa_i = 1;
+    float3 rh_i = {0, 0, 0}, rl_i = {0, 0, 0};
+    if (active) {
+        omega_i = fminf((float)omega[i], 1e12f);
+        kappa_i = (float)kappa[i];
+        const double x = grid_coord[i * 3 + 0], y = grid_coord[i * 3 + 1], z = grid_coord[i * 3 + 2];
+        rh_i.x = (float)x; rl_i.x = (float)(x - (double)rh_i.x);
+        rh_i.y = (float)y; rl_i.y = (float)(y - (double)rh_i.y);
+        rh_i.z = (float)z; rl_i.z = (float)(z - (double)rh_i.z);
+    }
+
+    double U_i = 0, W_i = 0, E_i = 0;
+
+    __shared__ float3 s_okr[NG_PER_BLOCK];   // omega, kappa, rho*weight
+    __shared__ float3 s_rh[NG_PER_BLOCK];
+    __shared__ float3 s_rl[NG_PER_BLOCK];
+
+    for (int j_block_offset = 0; j_block_offset < ngrids; j_block_offset += NG_PER_BLOCK) {
+        const int j = j_block_offset + threadIdx.x;
+        if (j < ngrids) {
+            s_okr[threadIdx.x] = make_float3(fminf((float)omega[j], 1e12f), (float)kappa[j], (float)rho_weight[j]);
+            const double x = grid_coord[j * 3 + 0], y = grid_coord[j * 3 + 1], z = grid_coord[j * 3 + 2];
+            float3 h, l;
+            h.x = (float)x; l.x = (float)(x - (double)h.x);
+            h.y = (float)y; l.y = (float)(y - (double)h.y);
+            h.z = (float)z; l.z = (float)(z - (double)h.z);
+            s_rh[threadIdx.x] = h;
+            s_rl[threadIdx.x] = l;
+        }
+        __syncthreads();
+
+        const int n = min(NG_PER_BLOCK, ngrids - j_block_offset);
+        for (int j0 = 0; j0 < n; j0 += VV10_CHUNK) {
+            float U_c = 0, W_c = 0, E_c = 0;
+            const int j1 = min(j0 + VV10_CHUNK, n);
+            for (int jj = j0; jj < j1; jj++) {
+                const float3 okr = s_okr[jj];
+                const float3 h = s_rh[jj];
+                const float3 l = s_rl[jj];
+                const float dx = (rh_i.x - h.x) + (rl_i.x - l.x);
+                const float dy = (rh_i.y - h.y) + (rl_i.y - l.y);
+                const float dz = (rh_i.z - h.z) + (rl_i.z - l.z);
+                const float r2 = fmaf(dx, dx, fmaf(dy, dy, dz * dz));
+                const float g_ij = fminf(fmaf(omega_i, r2, kappa_i), 1e12f);
+                const float g_ji = fminf(fmaf(okr.x, r2, okr.y), 1e12f);
+                const float g_sum = g_ij + g_ji;
+                const float inv = __frcp_rn(g_ij * g_ji * g_sum);
+                const float E_ij = -okr.z * inv;
+                const float U_ij = E_ij * (g_sum + g_ij) * g_ji * inv;
+                E_c += E_ij;
+                U_c += U_ij;
+                W_c = fmaf(U_ij, r2, W_c);
+            }
+            E_i += (double)E_c;
+            U_i += (double)U_c;
+            W_i += (double)W_c;
+        }
+        __syncthreads();
+    }
+
+    if (active) {
+        U[i] = -U_i * 1.5;
+        W[i] = -W_i * 1.5;
+        E[i] = E_i * 1.5;
+    }
+}
+
 __global__
 static void vv10_fock_eval_omega_derivative_kernel(double* __restrict__ omega, double* __restrict__ domega_drho, double* __restrict__ domega_dgamma,
                                                    const double* __restrict__ rho, const double* __restrict__ gamma, const double C_factor,
@@ -661,6 +750,25 @@ int VXC_vv10nlc_fock_eval_UWE(const cudaStream_t stream,
     const cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA Error of vv10 fock eval_UWE: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    return 0;
+}
+
+__host__
+int VXC_vv10nlc_fock_eval_UWE_fp32(const cudaStream_t stream,
+                                   double* U, double* W, double* E,
+                                   const double* grid_coord, const double* rho_weight,
+                                   const double* omega, const double* kappa,
+                                   const int ngrids)
+{
+    const dim3 threads(NG_PER_BLOCK);
+    const dim3 blocks((ngrids+NG_PER_BLOCK-1)/NG_PER_BLOCK);
+    vv10_fock_eval_UWE_fp32_kernel<<<blocks, threads, 0, stream>>>(U, W, E,
+                                                                   grid_coord, rho_weight, omega, kappa, ngrids);
+    const cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error of vv10 fock eval_UWE_fp32: %s\n", cudaGetErrorString(err));
         return 1;
     }
     return 0;

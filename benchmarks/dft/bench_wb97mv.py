@@ -32,6 +32,7 @@ def _sync():
 def timed(name, obj, attr):
     '''Replace obj.attr by a version that accumulates synchronised wall time under `name`.'''
     f = getattr(obj, attr)
+    STAGES.setdefault(name, [0.0, 0])  # register now so a timer that never fires is reported
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
@@ -52,13 +53,13 @@ def install_timers():
     from gpu4pyscf.dft import numint, gen_grid, rks
     from gpu4pyscf.df import df, df_jk
     timed('grids.build', gen_grid.Grids, 'build')
-    timed('XC main (nr_rks)', numint, 'nr_rks')
-    timed('NLC total (nr_nlc_vxc)', numint, 'nr_nlc_vxc')
+    # get_veff calls these through the NumInt instance, so patch the class attributes
+    timed('XC main (nr_rks)', numint.NumInt, 'nr_rks')
+    timed('NLC total (nr_nlc_vxc)', numint.NumInt, 'nr_nlc_vxc')
     timed('  VV10 kernels (_vv10nlc)', numint, '_vv10nlc')
     timed('DF.build (cderi)', df.DF, 'build')
     timed('df_jk.get_jk', df_jk, 'get_jk')
     timed('df_jk.get_j', df_jk, 'get_j')
-    timed('numint eval_ao', numint, 'eval_ao')
 
 
 def build_mol(args):
@@ -141,6 +142,13 @@ def main():
     print(f'{"stage":32s} {"total/s":>9s} {"calls":>6s} {"per-call/s":>11s}')
     for k, (sec, n) in STAGES.items():
         print(f'{k:32s} {sec:9.3f} {n:6d} {sec / n:11.3f}')
+    # nested timers (indented names) are not part of the top-level sum
+    top = sum(v[0] for k, v in STAGES.items() if not k.startswith(' '))
+    print(f'{"unaccounted (diag, DIIS, misc)":32s} {t_scf - top:9.3f}')
+    res['unaccounted'] = t_scf - top
+    dead = [k for k, v in STAGES.items() if v[1] == 0]
+    if dead:
+        print('WARNING: timers that never fired:', dead)
     if args.grad:
         print(f'gradient time: {res["grad_time"]:.2f} s')
 

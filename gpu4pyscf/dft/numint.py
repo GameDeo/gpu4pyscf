@@ -42,6 +42,9 @@ AO_ALIGNMENT = getattr(__config__, 'ao_aligned', 16)
 AO_THRESHOLD = 1e-10
 GB = 1024*1024*1024
 NLC_REMOVE_ZERO_RHO_GRID_THRESHOLD = 1e-10
+# Precision of the O(N^2) VV10 pair kernel: 'fp64' or 'fp32' (FP32 pair arithmetic,
+# compensated FP64 accumulation; see vv10.cu).
+VV10_PRECISION = getattr(__config__, 'vv10_precision', 'fp64')
 
 # Should we release the cupy cache?
 FREE_CUPY_CACHE = False
@@ -390,7 +393,9 @@ def _vv10nlc(rho_drho, coords, weights, nlc_pars):
     W_i = cupy.empty(ngrids)
     E_i = cupy.empty(ngrids)
     stream = cupy.cuda.get_current_stream()
-    err = libgdft.VXC_vv10nlc_fock_eval_UWE(
+    uwe_kernel = (libgdft.VXC_vv10nlc_fock_eval_UWE_fp32 if VV10_PRECISION == 'fp32'
+                  else libgdft.VXC_vv10nlc_fock_eval_UWE)
+    err = uwe_kernel(
         ctypes.cast(stream.ptr, ctypes.c_void_p),
         ctypes.cast(U_i.data.ptr, ctypes.c_void_p),
         ctypes.cast(W_i.data.ptr, ctypes.c_void_p),
