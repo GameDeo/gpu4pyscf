@@ -24,6 +24,18 @@ MAX_K = 120000       # int32 accumulation limit of one residue GEMM: K * 128^2 <
 _kern = {}
 
 
+def _resid_code(i, p, wide, dst):
+    '''C statements: r = x mod p (balanced) -> dst.  Wide (int64) values are split into two int32 limbs (x = xh 2^18 + xl),
+    because 64-bit `%` is slow on the GPU.  Valid for |x| < 2^49.'''
+    h = (p + 1) // 2
+    if wide:
+        c = (1 << 18) % p
+        core = f'int r = ((xh % {p}) * {c} + xl) % {p};'
+    else:
+        core = f'int r = x % {p};'
+    return f'{{ {core} if (r < 0) r += {p}; if (r >= {h}) r -= {p}; {dst} = (signed char)r; }}'
+
+
 def plan(K, nmod, qmax=QMAX):
     '''q (bits of each operand) such that prod(p_i) > 2 K 2^{2q}.'''
     bits = float(np.sum(np.log2(ALL_MODULI[:nmod])))
@@ -33,11 +45,8 @@ def plan(K, nmod, qmax=QMAX):
 
 def _quant_src(n, wide):
     T = 'long long' if wide else 'int'
-    body = []
-    for i, p in enumerate(ALL_MODULI[:n]):
-        h = (p + 1) // 2
-        body.append(f'{{ {T} r = x % {p}; if (r < 0) r += {p}; if (r >= {h}) r -= {p}; '
-                    f'out[(size_t){i} * plane + idx] = (signed char)r; }}')
+    pre = 'int xh = (int)(x >> 18), xl = (int)(x & 0x3FFFF);' if wide else ''
+    body = [_resid_code(i, p, wide, f'out[(size_t){i} * plane + idx]') for i, p in enumerate(ALL_MODULI[:n])]
     return r'''
 extern "C" __global__ void quant(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
                                  int ncomp, int rows, int ng, int rp, int kp, int q, size_t plane)
@@ -52,7 +61,7 @@ extern "C" __global__ void quant(const double* __restrict__ a, const int* __rest
         double v = ldexp(a[((size_t)c * rows + row) * ng + g], q - ex[row]);
         x = (''' + T + r''')llrint(v);
     }
-    ''' + '\n    '.join(body) + '\n}\n'
+    ''' + pre + '\n    ' + '\n    '.join(body) + '\n}\n'
 
 
 def _recon_src(n):
@@ -95,11 +104,8 @@ extern "C" __global__ void recon(const int* __restrict__ C, const int* __restric
 
 def _quant3t_src(n, wide):
     T = 'long long' if wide else 'int'
-    body = []
-    for i, p in enumerate(ALL_MODULI[:n]):
-        h = (p + 1) // 2
-        body.append(f'{{ {T} r = x % {p}; if (r < 0) r += {p}; if (r >= {h}) r -= {p}; '
-                    f'out[(size_t){i} * plane + base] = (signed char)r; }}')
+    pre = 'int xh = (int)(x >> 18), xl = (int)(x & 0x3FFFF);' if wide else ''
+    body = [_resid_code(i, p, wide, f'out[(size_t){i} * plane + base]') for i, p in enumerate(ALL_MODULI[:n])]
     return r'''
 extern "C" __global__ void quant3t(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
                                    int d0, int d1, int d2, long long s0, long long s2, int P1, int P2, int q, size_t plane)
@@ -122,7 +128,7 @@ extern "C" __global__ void quant3t(const double* __restrict__ a, const int* __re
         if (c1 < P1 && c2 < P2) {
             ''' + T + r''' x = tile[threadIdx.x][threadIdx.y + 8 * t];
             size_t base = ((size_t)i * P1 + c1) * P2 + c2;
-            ''' + '\n            '.join(body) + r'''
+            ''' + pre + '\n            ' + '\n            '.join(body) + r'''
         }
     }
 }

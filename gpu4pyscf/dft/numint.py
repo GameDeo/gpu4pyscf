@@ -1860,9 +1860,15 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
         occ_mask = mo_occ > 0
         cpos_all = cupy.asarray(mo_coeff[:, occ_mask], order='C') * mo_occ[occ_mask]**.5
         cpos_all = cpos_all.astype(np.float32)
+    crt_xc = (XC_PRECISION == 'crt' and mo_coeff is not None and mo_coeff.ndim == 2)
+    if crt_xc:
+        occ_mask = mo_occ > 0
+        cpos_crt = cupy.asarray(mo_coeff[:, occ_mask], order='C') * mo_occ[occ_mask]**.5
     for ao, idx, weight, coords \
             in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, max_memory=max_memory):
-        if fp32_xc:
+        if crt_xc and XC_CRT_RHO:
+            rho = _eval_rho2_crt(ao, cupy.asarray(cpos_crt[idx], order='C'), 'GGA')
+        elif fp32_xc:
             rho = _eval_rho2_fp32(ao.astype(np.float32), cpos_all[idx], 'GGA').astype(np.float64)
         elif mo_coeff is None:
             rho = eval_rho(_sorted_mol, ao, dms[idx[:,None],idx], xctype='GGA', hermi=1)
@@ -1902,6 +1908,12 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
             vtmp32 = cupy.empty((nsub, nsub), dtype=np.float32)
             _vmat_block_fp32(ao.astype(np.float32), wv.astype(np.float32), 'GGA', vtmp32)
             add_sparse(vmat, vtmp32.astype(np.float64), mask)
+            continue
+        if crt_xc:
+            nsub = len(mask)
+            vtmp = cupy.empty((nsub, nsub))
+            _vmat_block_crt(ao, wv, 'GGA', vtmp)
+            add_sparse(vmat, vtmp, mask)
             continue
         aow = _scale_ao(ao, wv)
         add_sparse(vmat, ao[0].dot(aow.T), mask)
