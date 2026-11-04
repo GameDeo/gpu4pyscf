@@ -642,14 +642,18 @@ def get_jk(dfobj, dms, hermi=0, with_j=True, with_k=True,
             if with_k and crt_k:
                 from gpu4pyscf.lib import crt_gemm
                 nL = len(cderi)
-                sub = max(1, int(K_CRT_BUDGET / (K_CRT_MODULI * nao * max(nao, nocc))))
+                jp = (nao + 15) // 16 * 16
+                sub = max(16, int(K_CRT_BUDGET / (K_CRT_MODULI * nao * jp)) // 16 * 16)
                 for s in range(nspin):
                     for n in range(n_dm):
-                        ct = cupy.ascontiguousarray(factor_l[s, n].T)[None]       # [1, nocc, nao]
+                        ct = cupy.ascontiguousarray(factor_l[s, n].T)                # [nocc, nao]
                         for l0 in range(0, nL, sub):
                             l1 = min(nL, l0 + sub)
-                            rhok = crt_gemm.gemm_nt(cderi[l0:l1].reshape(1, (l1-l0)*nao, nao), ct, K_CRT_MODULI)
-                            rhok = rhok.reshape(l1-l0, nao, nocc)                  # [L, i, k]
+                            view = cderi[l0:l1].transpose(1, 0, 2)                    # [i, L, j]
+                            if view.strides[1] != view.itemsize:
+                                view = cupy.ascontiguousarray(cderi[l0:l1].transpose(1, 2, 0)).transpose(0, 2, 1)
+                            rhok, P1 = crt_gemm.gemm_planes(view, ct, K_CRT_MODULI)  # rows (i, L), cols k
+                            rhok = rhok.reshape(1, nao, P1 * nocc)
                             vk[s, n] += crt_gemm.gemm_nt(rhok, rhok, K_CRT_MODULI)
             elif with_k:
                 if fp32_k:

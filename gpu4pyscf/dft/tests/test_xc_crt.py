@@ -64,6 +64,51 @@ class KnownValues(unittest.TestCase):
         c = crt_gemm.gemm_nt(a, b, 12)
         self.assertLess(float(cupy.abs(c - ref).max() / cupy.abs(ref).max()), 1e-9)
 
+    def test_gemm_planes(self):
+        '''transposed-layout operand: out[(i, l), b] = sum_j A[i, j, l] bt[b, j] for a stride-1 axis-1 view'''
+        rng = np.random.default_rng(3)
+        w = cupy.asarray(rng.standard_normal((50, 50, 40)) * np.exp(-2 * np.abs(rng.standard_normal((50, 50, 40)))))
+        src = cupy.ascontiguousarray(w[:, :, :37].transpose(0, 1, 2))  # [i, j, L]  (L contiguous)
+        view = src.transpose(0, 2, 1)                                  # (i, L, j)
+        bt = cupy.asarray(rng.standard_normal((9, 50)))
+        ref = cupy.einsum('ilj,bj->ilb', view, bt)
+        out, P1 = crt_gemm.gemm_planes(view, bt, 12)
+        out = out.reshape(50, P1, 9)[:, :37]
+        err = float(cupy.abs(out - ref).max() / cupy.abs(ref).max())
+        print(f'[gemm_planes] rel err {err:.2e}')
+        self.assertLess(err, 1e-9)
+
+    def test_rho(self):
+        from gpu4pyscf.dft.numint import _eval_rho2, _eval_rho2_crt
+        ni = mf._numint
+        opt = ni.gdftopt
+        mo = cupy.asarray(mf.mo_coeff)[:, mf.mo_occ > 0] * cupy.asarray(mf.mo_occ[mf.mo_occ > 0]) ** .5
+        n = 0
+        for ao_mask, idx, weight, _ in ni.block_loop(opt._sorted_mol, mf.grids, mol.nao, 1, max_memory=None):
+            cpos = cupy.asarray(mo[idx], order='C')
+            for xctype in ('LDA', 'GGA', 'MGGA'):
+                ao = ao_mask[0] if xctype == 'LDA' else ao_mask
+                r0 = _eval_rho2(ao_mask[0] if xctype == 'LDA' else ao_mask, cpos, xctype)
+                r1 = _eval_rho2_crt(ao, cpos, xctype)
+                self.assertLess(float(cupy.abs(r1 - r0).max() / cupy.abs(r0).max()), 1e-9)
+            n += 1
+            if n >= 3:
+                break
+
+    def test_k(self):
+        from gpu4pyscf.df import df_jk
+        dm = mf.make_rdm1()
+        vj0, vk0 = mf.get_jk(mol, dm)
+        old = df_jk.K_PRECISION, df_jk.K_CRT_MODULI
+        df_jk.K_PRECISION, df_jk.K_CRT_MODULI = 'crt', 12
+        try:
+            vj1, vk1 = mf.get_jk(mol, dm)
+        finally:
+            df_jk.K_PRECISION, df_jk.K_CRT_MODULI = old
+        err = float(cupy.abs(vk1 - vk0).max())
+        print(f'[K crt] max|dK| {err:.2e}')
+        self.assertLess(err, 1e-9)
+
     def _check(self, xc, nmod, tol):
         dm = mf.make_rdm1()
         n0, e0, v0 = mf._numint.nr_rks(mol, mf.grids, xc, dm)

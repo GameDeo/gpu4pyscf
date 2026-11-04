@@ -60,6 +60,7 @@ XC_VMAT_CHUNK = 0
 # residue products (gpu4pyscf.lib.crt_gemm); rho stays FP64.  Number of INT8 moduli (about 8 bits each):
 # 10 -> ~1e-9, 12 -> ~3e-11, 14 -> ~5e-13 relative to the largest element of each product.
 XC_CRT_MODULI = 11
+XC_CRT_RHO = True     # also evaluate the density (MO-based path) with INT8 residue GEMMs
 
 # Should we release the cupy cache?
 FREE_CUPY_CACHE = False
@@ -483,6 +484,37 @@ def _eval_rho2_fp32(ao, cpos, xctype):
         rho[4] *= .5
     return rho
 
+def _eval_rho2_crt(ao, cpos, xctype):
+    '''FP64-class version of _eval_rho2 from INT8 residue GEMMs (ao: [comp,nao,ng] or [nao,ng]; cpos [nao,nocc]).'''
+    from gpu4pyscf.lib import crt_gemm
+    ctT = cupy.ascontiguousarray(cpos.T)
+    ngrids = ao.shape[-1]
+
+    def c_of(a):
+        a = cupy.ascontiguousarray(a)
+        nk = a.shape[0]
+        view = cupy.lib.stride_tricks.as_strided(a, shape=(1, ngrids, nk), strides=(0, a.itemsize, ngrids * a.itemsize))
+        c, _ = crt_gemm.gemm_planes(view, ctT, XC_CRT_MODULI)
+        return c[:ngrids]                       # [ng, nocc]
+
+    if xctype == 'LDA':
+        c0 = c_of(ao if ao.ndim == 2 else ao[0])
+        return (c0 * c0).sum(axis=1)[None]
+    nvar = 4 if xctype in ('GGA', 'NLC') else 5
+    rho = cupy.empty((nvar, ngrids))
+    c0 = c_of(ao[0])
+    rho[0] = (c0 * c0).sum(axis=1)
+    if nvar == 5:
+        rho[4] = 0
+    for i in range(1, 4):
+        c1 = c_of(ao[i])
+        rho[i] = 2 * (c0 * c1).sum(axis=1)
+        if nvar == 5:
+            rho[4] += (c1 * c1).sum(axis=1)
+    if nvar == 5:
+        rho[4] *= .5
+    return rho
+
 def _vmat_block_fp32(ao, wv, xctype, out):
     '''FP32 version of the per-block XC matrix build; ao [comp,nao,ng], wv [nvar,ng] (float32).
     Returns the (unsymmetrized) FP32 block in `out`.'''
@@ -582,6 +614,8 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                    and xctype in ('LDA', 'GGA', 'MGGA'))
         fp32_rho = fp32_xc and 'rho' in XC_REDUCED_PARTS
         fp32_vmat = fp32_xc and 'vmat' in XC_REDUCED_PARTS
+        crt_rho = (XC_PRECISION == 'crt' and XC_CRT_RHO and mo_coeff is not None
+                   and xctype in ('LDA', 'GGA', 'MGGA'))
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(
                 _sorted_mol, grids, nao, ao_deriv, max_memory=None,
@@ -602,6 +636,8 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                 if fp32_rho:
                     rho_tot[:,p0:p1] = _eval_rho2_fp32(
                         ao_mask.astype(np.float32), cpos.astype(np.float32), xctype)
+                elif crt_rho:
+                    rho_tot[:,p0:p1] = _eval_rho2_crt(ao_mask, cpos, xctype)
                 else:
                     rho_tot[:,p0:p1] = _eval_rho2(ao_mask, cpos, xctype, with_lapl, buf=buf)
         t0 = log.timer_debug1(f'eval rho on Device {device_id}', *t0)

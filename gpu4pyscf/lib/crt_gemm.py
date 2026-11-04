@@ -93,12 +93,66 @@ extern "C" __global__ void recon(const int* __restrict__ C, const int* __restric
 '''
 
 
+def _quant3t_src(n, wide):
+    T = 'long long' if wide else 'int'
+    body = []
+    for i, p in enumerate(ALL_MODULI[:n]):
+        h = (p + 1) // 2
+        body.append(f'{{ {T} r = x % {p}; if (r < 0) r += {p}; if (r >= {h}) r -= {p}; '
+                    f'out[(size_t){i} * plane + base] = (signed char)r; }}')
+    return r'''
+extern "C" __global__ void quant3t(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
+                                   int d0, int d1, int d2, long long s0, long long s2, int P1, int P2, int q, size_t plane)
+{
+    __shared__ ''' + T + r''' tile[32][33];
+    int i = blockIdx.z;
+    int c1b = blockIdx.y * 32, c2b = blockIdx.x * 32;
+    for (int t = 0; t < 4; t++) {
+        int c1 = c1b + threadIdx.x, c2 = c2b + threadIdx.y + 8 * t;
+        ''' + T + r''' x = 0;
+        if (c1 < d1 && c2 < d2) {
+            double v = ldexp(a[(long long)i * s0 + c1 + (long long)c2 * s2], q - ex[c1]);
+            x = (''' + T + r''')llrint(v);
+        }
+        tile[threadIdx.y + 8 * t][threadIdx.x] = x;
+    }
+    __syncthreads();
+    for (int t = 0; t < 4; t++) {
+        int c1 = c1b + threadIdx.y + 8 * t, c2 = c2b + threadIdx.x;
+        if (c1 < P1 && c2 < P2) {
+            ''' + T + r''' x = tile[threadIdx.x][threadIdx.y + 8 * t];
+            size_t base = ((size_t)i * P1 + c1) * P2 + c2;
+            ''' + '\n            '.join(body) + r'''
+        }
+    }
+}
+'''
+
+
+_COLMAX_SRC = r'''
+extern "C" __global__ void colmax(const double* __restrict__ a, unsigned long long* __restrict__ mx,
+                                  int d1, int d2, long long s0, long long s2)
+{
+    int c1 = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c1 >= d1) return;
+    const double* p = a + (long long)blockIdx.y * s0 + c1;
+    double m = 0.;
+    for (int c2 = 0; c2 < d2; c2++) m = fmax(m, fabs(p[(long long)c2 * s2]));
+    atomicMax(mx + c1, (unsigned long long)__double_as_longlong(m));
+}
+'''
+
+
 def _get(kind, n, wide=False):
     key = (kind, n, wide)
     k = _kern.get(key)
     if k is None:
         if kind == 'q':
             k = cupy.RawKernel(_quant_src(n, wide), 'quant')
+        elif kind == 't':
+            k = cupy.RawKernel(_quant3t_src(n, wide), 'quant3t')
+        elif kind == 'cm':
+            k = cupy.RawKernel(_COLMAX_SRC, 'colmax')
         else:
             k = cupy.RawKernel(_recon_src(n), 'recon')
         _kern[key] = k
@@ -164,6 +218,37 @@ class Operand:
         _get('q', nmod, q > 30)(((tot + thr - 1) // thr,), (thr,),
                                 (src, ex, self.planes, np.int32(ncomp), np.int32(rows), np.int32(ng),
                                  np.int32(self.rp), np.int32(self.kp), np.int32(q), np.uint64(tot)))
+
+
+class PlanesT:
+    '''Residues of a strided 3-D float64 view src (d0, d1, d2) whose axis 1 is the memory-contiguous one
+    (stride 1), laid out as planes [nmod][d0][P1][P2] (d1, d2 zero-padded to multiples of 16): the GEMM reduction
+    axis is d2, the rows are (d0, d1) and every row index d1 has its own power-of-two scale (max over d0 and d2).
+    The memory-layout transposition (d1 contiguous in src -> d2 contiguous in the planes) happens in the quantize
+    kernel via shared-memory tiles, so e.g. the DF tensor [i, j, L] (L contiguous) feeds the TN INT8 GEMM directly.'''
+
+    def __init__(self, src, nmod, q):
+        d0, d1, d2 = src.shape
+        isz = src.itemsize
+        assert src.dtype == cupy.float64 and src.strides[1] == isz
+        s0, s2 = src.strides[0] // isz, src.strides[2] // isz
+        self.nmod, self.q = nmod, q
+        P1, P2 = _pad16(d1), _pad16(d2)
+        mx = cupy.zeros(P1, dtype=cupy.uint64)
+        thr = 128
+        _get('cm', 0)(((d1 + thr - 1) // thr, d0), (thr,),
+                      (src, mx, np.int32(d1), np.int32(d2), np.int64(s0), np.int64(s2)))
+        amax = mx.view(cupy.float64)
+        _, e = cupy.frexp(amax)
+        e = cupy.where(amax == 0, 0, e).astype(cupy.int32)
+        ex = e
+        self.rows, self.rp, self.kp = d0 * P1, d0 * P1, P2
+        self.e = cupy.tile(ex, d0)                         # exponent of row (i, l)
+        planes = cupy.empty((nmod, d0, P1, P2), dtype=cupy.int8)
+        _get('t', nmod, q > 30)(((P2 + 31) // 32, (P1 + 31) // 32, d0), (32, 8),
+                                (src, ex, planes, np.int32(d0), np.int32(d1), np.int32(d2), np.int64(s0), np.int64(s2),
+                                 np.int32(P1), np.int32(P2), np.int32(q), np.uint64(d0 * P1 * P2)))
+        self.planes = planes.reshape(nmod, d0 * P1, P2)
 
 
 def int8_mm_nt(a, bt, out):
@@ -238,3 +323,17 @@ def gemm_nt(a, b, nmod, out=None, qmax=QMAX):
         matmul_operands(oa, ob, out, accumulate=not first)
         first = False
     return out
+
+
+def gemm_planes(src3, bt, nmod, out=None, qmax=QMAX):
+    '''out (d0 * P1, nb) float64 = sum_{d2} src3[i, l, d2] * bt[b, d2]   (rows ordered (i, l), l zero-padded to P1).
+    src3: strided float64 view (d0, d1, d2) with stride-1 axis 1 (see PlanesT), bt: (nb, d2) float64 contiguous.'''
+    d0, d1, d2 = src3.shape
+    assert d2 <= MAX_K
+    q = plan(d2, nmod, qmax)
+    oa = PlanesT(src3, nmod, q)
+    ob = Operand(bt[None], nmod, q)
+    if out is None:
+        out = cupy.empty((oa.rows, ob.rows), dtype=cupy.float64)
+    matmul_operands(oa, ob, out)
+    return out, _pad16(d1)
