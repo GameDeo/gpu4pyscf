@@ -4,28 +4,22 @@ Branch: `claude/serene-meitner-kinyv4` (local only; push blocked until GitHub ac
 Last commit at time of writing: "cuTENSOR plan cache, A100 results, plan status". See RESULTS_mixed_precision.md and
 PLAN_stage2_algorithms.md for all numbers.
 
-## Headline state
-* Bisphenol A, wB97M-V/def2-TZVP, DF, default grids. T4: original 296.8 s (SCF 249.7 + grad 47.1) -> 104.3 s (SCF 87.0 + grad 17.3), dE 3.7e-10 Eh, max grad error 1.2e-7.
-* A100 FP64: SCF 12.35 -> 10.95 s from the exact cuTENSOR plan cache. Mixed precision gives nothing on A100 (FP64 TC = FP32 SIMT); contract-first gradient gives nothing there either.
-* T4 is ~7.8x slower than A100 FP64 now (was ~19.5x). Raw FP64 ratio is ~100x.
+## Headline state (updated after round 3)
+* Bisphenol A, wB97M-V/def2-TZVP, DF, default grids, T4: original 296.8 s (SCF 249.7 + grad 47.1) -> 70 s (SCF 48.7 + grad 21.6 first call, 16.8 steady),
+  dE 1.4e-10 Eh vs a tight FP64 reference, max grad error 1.1e-7.  Scheme `mf.mixed_precision = {'scheme': 'crt'}` (auto on sm_75/86/87/89):
+  coarse-grid stage (50,194) with 8 INT8 moduli to |g|<1e-3, then full grid, 11 moduli (XC, K), 15 moduli for the DF-tensor build,
+  FP32 VV10 (symmetric tiled kernel), final_grad_factor 0.1.  Everything is in `gpu4pyscf/lib/crt_gemm.py` + hooks (see RESULTS round 3).
+* A100 FP64 (old pipeline, before round 3): SCF 10.95 s + grad 2.5 s.  A100 has NOT been measured with: crt scheme, coarse-grid stage,
+  symmetric VV10 kernel, fused XC loops (agent branches merged).  sm_80 libraries are being built on the T4 host (`libs80.tgz`).
+* Merged agent work: VV10 symmetric tiled kernel (`dft/vv10_kernels.py`), fused XC loops (`dft/xc_fused.py`, `numint.XC_FUSED`; crt paths take
+  precedence over the fused loops).  Research reports: scratchpad `research_report.md` (done), `research_report2.md` (running).
 
 ## Next steps, in order
-1. **CRT (Ozaki-II) INT8 micro-benchmark on T4** (cheap, decides everything below).
-   Own implementation (GEMMul8 clone was refused by the permission classifier; ask before trying again).
-   8-12 coprime moduli <= 256, symmetric residues in [-p/2, p/2], integer-only fused quantize+mod kernel, INT8 GEMM
-   via legacy `cublasGemmEx` TN (Turing needs m,n,k % 16 == 0), mod-reduce, Garner/Horner reconstruction.
-   Operands: real BPA XC-vmat (K=61440) and K-build shapes (see gemm_precision_bench.py / ozaki_int8.py).
-   Report accuracy vs moduli, GEMM time, quantize time, reconstruct time **together** (the Ozaki-I benchmark left slicing out:
-   cupy slicer 334 ms vs 24 ms GEMM). Compare with Ozaki-I (28 products at 7 slices). Go/no-go: >= 5x native FP64 end to end at SCF-grade accuracy.
-   Also add achieved-TFLOPS per kernel (FLOPs from shapes / profiler time) to profile_xc_kernels.py.
-2. If go: integrate into FP64-stage XC (accumulate residues across grid blocks with one global fixed-point scale, reconstruct once per Vxc),
-   then K (DF tensor is static: quantize + reduce once per SCF), then the gradient. Precision ladder = number of moduli (Huang et al. 2601.08077).
-   Expected T4 gain: FP64 XC is ~22 s of the 87 s SCF; at 4-5x saves 16-18 s (SCF ~87 -> ~70 s). Not yet measured.
-3. Launch-overhead reduction in the XC loops (helps A100/H100 most, exact): one batched GEMM for c = C^T [ao0..ao3], a fused MGGA rho kernel,
-   fewer small kernels in the Vxc path (~100k python calls per XC evaluation, A100 GPU idle ~50 % of nr_rks).
-4. VV10 symmetric-pair kernel (exact, ~1.5x fewer ops) and stream overlap of VV10 with XC/K.
-5. Reduced-precision DF-tensor storage (2x memory), half-triangle K contraction.
-6. TF32 3-split with outside-TC accumulation as a fused kernel (A100/H100 early cycles only).
+1. A100 run of the new pipeline: classic (FP64) vs crt scheme, with/without the coarse-grid stage, fused loops, VV10 FP32 (decide 'auto' per GPU).
+2. Research agent 2's report -> test the top exact / safe items (SCF solver / fewer Fock builds, grid reduction, K FLOP cuts, cheaper gradient).
+3. Gradient (16.8 s steady on T4): DF J/K gradient ~8 s (FP64 Rys int3c2e_ip1 3.3 s + cuTENSOR DGEMMs), XC grad 5.6 s, VV10 grad 3.3 s.
+4. XC (26 s of the SCF): quantize passes (fuse B build), recon, AO evaluation; symmetric tau-term GEMM halves; K static residue cache.
+5. Arch-dispatched Ampere/Ada-only paths must be kept as options (user request): TF32 3-split, FP8, batched non-TN INT8 (Turing rejects it).
 
 ## Findings to remember
 * FP64 XC on T4 is 95 % GEMM; FP32-XC solution has FP64 |g| ~ 4e-5 (Vxc-matrix FP32 accumulation, error ~ linear in chunk length), so 2-3 FP64 Fock builds always remain.
