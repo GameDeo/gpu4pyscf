@@ -266,3 +266,14 @@ in the coarse stage: VV10 kernel time 9.8 -> 2.7 s.  BPA T4 crt scheme: SCF 45.7
 | scheme 'crt' | 17.5 s | 1.60 s | -4.5e-10 | 1.9e-7 |
 Before this round the A100 needed 10.95 s (SCF) + 2.5 s (gradient): the merged VV10 + fused XC loops give ~2x; INT8 CRT is 3x *slower*
 than FP64 on the A100 (XC 0.705 vs 0.218 s/call: FP64 tensor cores + memory-bound quantize passes), so 'auto' selects 'classic' there.
+
+### More A100 facts (BPA, wB97M-V/def2-TZVP)
+* `nr_rks` = 0.196 s wall = 0.195 s GPU busy (no launch gaps left): GEMM 0.131 s (68 %, cutlass sm80 FP64 tensor-core kernels), AO 0.040 s, build_B 0.020 s.
+  GEMM work 2.4 TFLOP -> ~18 TFLOP/s = ~92 % of the 19.5 TFLOP/s FP64 tensor-core peak: the A100 XC is at its FP64 roofline, only FLOP cuts help.
+* XC_FUSED False -> True: 0.390 -> 0.194 s; merged K=4*blk GEMM vs four GEMMs: 0.206 vs 0.194 s (keep merged).
+* `cublasDsyrkx` (triangle-only product for the symmetric tau terms) is 6x *slower* than dgemm for n=500, K=16384 (SIMT, no tensor cores): no use.
+* Batched non-TN INT8 `cublasGemmStridedBatchedEx` is NOT supported on Ampere either (same CUBLAS_STATUS_NOT_SUPPORTED as on Turing; non-batched NN works).
+* Tamoxifen (57 atoms, 1.84M grid points): plain FP64 SCF 12.5 s + gradient 4.2 s; Vitamin C def2-QZVPP: 5.5 s + 1.7 s.  The 'classic' staged scheme
+  (coarse stage + FP32/FP64 stages) is neutral on A100 (13.1 s, 5.7 s) -> its coarse stage is now off by default; plain FP64 is the best A100 setting.
+* Finite-difference check of the analytic DF gradient (with grid response; PBE0 and wB97M-V, mix_outside/inside_kernel, crt): analytic - FD =
+  1.15e-6 (h = 0.002 bohr) -> 2.9e-7 (h = 0.001): scales as h^2, i.e. FD truncation error; no inconsistency between the range-separated SCF and gradient.
