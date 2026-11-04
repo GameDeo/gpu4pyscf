@@ -172,10 +172,14 @@ def _coarse_grids(mf, grid, nlc_grid=None):
 def _coarse_solvent(mf, lebedev_order):
     '''Run the coarse stage with a coarser solvent surface (see DEFAULTS['coarse_solvent_lebedev']).'''
     sol = getattr(mf, 'with_solvent', None)
-    if lebedev_order is None or sol is None or getattr(sol, 'frozen', False) or not hasattr(sol, 'lebedev_order'):
+    if lebedev_order is None or sol is None or getattr(sol, 'frozen', False):
         yield
         return
     from pyscf.dft.LebedevGrid import LEBEDEV_ORDER
+    from gpu4pyscf.solvent import pcm, smd
+    if not isinstance(sol, (pcm.PCM, smd.SMD)):   # e.g. the CuEST wrapper locks its surface settings
+        yield
+        return
     if LEBEDEV_ORDER[lebedev_order] >= LEBEDEV_ORDER[sol.lebedev_order]:
         yield
         return
