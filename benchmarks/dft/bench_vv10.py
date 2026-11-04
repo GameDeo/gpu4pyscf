@@ -138,9 +138,9 @@ void vv10_fock_eval_UWE_kernel(double* __restrict__ U, double* __restrict__ W, d
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = i < ngrids;
-    double omega_i = NAN;
-    double kappa_i = NAN;
-    double3 r_i = { NAN, NAN, NAN };
+    double omega_i = __longlong_as_double(0x7ff8000000000000LL);
+    double kappa_i = __longlong_as_double(0x7ff8000000000000LL);
+    double3 r_i = { 0.0, 0.0, 0.0 };
     if (active) {
         omega_i = omega[i];
         kappa_i = kappa[i];
@@ -335,7 +335,7 @@ def load_kernels_module():
 FLOPS_PER_PAIR = {  # (instr per ordered pair, nominal flops with FMA=2)
     'ref64': (20 + 10, 28), 'sib32': (29 + 4, 32),
     'v1_64': (19 + 10, 26), 'v1_32': (19 + 4, 26),
-    'sym_64': (16 + 8 + 5, 26), 'sym_32': (16 + 4 + 3, 26),
+    'sym_64': (16 + 8 + 5, 26), 'sym_32': (16 + 4 + 3, 26), 
 }
 
 
@@ -345,7 +345,10 @@ def run_variant(name, d, refk, vk, rcut=0.0, extra=None):
         fn = lambda: refk.run(name, d)
     else:
         kind, prec = name.split('_')
-        kw = {'precision': 'fp64' if prec == '64' else 'fp32', 'rcut': rcut,
+        # a trailing 'c' applies the --rcut distance cutoff to this variant only
+        cut = rcut if prec.endswith('c') else 0.0
+        prec = prec.rstrip('c')
+        kw = {'precision': 'fp32' if prec == '32' else 'fp64', 'rcut': cut,
               'symmetric': kind == 'sym'}
         kw.update(extra or {})
         fn = lambda: vk.eval_UWE(d['xyz'], d['rw'], d['omega'], d['kappa'], **kw)
@@ -373,6 +376,7 @@ def main():
     p.add_argument('--sub', type=int, default=0, help='random subset of this many points (timing of the slow kernels)')
     p.add_argument('--rcut', type=float, default=0.0)
     p.add_argument('--skip-ref', action='store_true', help='do not run ref64 (use v1_64 as the reference)')
+    p.add_argument('--sweep', default='', help='nt:mi,nt:mi,... thread-block / register-tile sweep of the sym_/v1_ variants')
     p.add_argument('--peak', default='', help='name:fp64_tflops:fp32_tflops, for the efficiency columns')
     a = p.parse_args()
     if a.make:
@@ -398,6 +402,18 @@ def main():
         n = d['xyz'].shape[0]
         print('=== %s: N = %d (pairs %.3e)' % (os.path.basename(f), n, float(n)**2), flush=True)
         ref = None
+        if a.sweep:
+            for name in a.variants.split(','):
+                for cfg in a.sweep.split(','):
+                    nt, mi = (int(v) for v in cfg.split(':'))
+                    fn = run_variant(name, d, refk, vk, rcut=a.rcut, extra={'nthreads': nt, 'mi': mi})
+                    try:
+                        t, out = timeit(fn, nrep=2)
+                    except Exception as e:
+                        print('%-8s nt=%d mi=%d failed: %s' % (name, nt, mi, str(e)[:80]))
+                        continue
+                    print('%-8s nt=%3d mi=%d  %.3f s  %.3e pairs/s' % (name, nt, mi, t, float(n)**2 / t), flush=True)
+            continue
         for name in a.variants.split(','):
             fn = run_variant(name, d, refk, vk, rcut=a.rcut)
             if name == 'ref64' and a.skip_ref:
@@ -408,7 +424,7 @@ def main():
             err = rel_errors(d, ref, out) if out is not ref else {}
             ins, fl = FLOPS_PER_PAIR.get(name, (0, 0))
             pps = float(n)**2 / t
-            prec = '64' if name.endswith('64') else '32'
+            prec = '32' if name.rstrip('c').endswith('32') else '64'
             tflops = pps * fl * 1e-12
             line = '%-8s %8.3f s  %8.3e pairs/s  %6.2f TFLOPS(nominal)' % (name, t, pps, tflops)
             if peaks:

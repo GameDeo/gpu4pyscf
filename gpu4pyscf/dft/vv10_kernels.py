@@ -136,13 +136,14 @@ void vv10_onesided(double* __restrict__ Uo, double* __restrict__ Wo, double* __r
                         const REAL a = fma(om[k], r2, ka[k]);
                         const REAL b = fma(o.x, r2, o.y);
                         const REAL s = a + b;
-                        const REAL P = vrcp(a * b * s);
-                        const REAL Pw = p.w * P;
-                        const REAL m = Pw * P * (b * (s + a));
+                        const REAL ab = a * b;
+                        const REAL P = vrcp(ab * s);
+                        const REAL q = P * P;
+                        const REAL m = (p.w * q) * fma(b, s, ab);     // b (s + a) = b s + a b
 #if PREC32
-                        Ec[k] += Pw; Uc[k] += m; Wc[k] = fma(m, r2, Wc[k]);
+                        Ec[k] = fma(p.w, P, Ec[k]); Uc[k] += m; Wc[k] = fma(m, r2, Wc[k]);
 #else
-                        Et[k] += Pw; Ut[k] += m; Wt[k] = fma(m, r2, Wt[k]);
+                        Et[k] = fma(p.w, P, Et[k]); Ut[k] += m; Wt[k] = fma(m, r2, Wt[k]);
 #endif
                     }
                 }
@@ -234,13 +235,13 @@ void vv10_sym(double* __restrict__ Uo, double* __restrict__ Wo, double* __restri
                         const REAL a = fma(om[k], r2, ka[k]);
                         const REAL b = fma(oj.x, r2, oj.y);
                         const REAL s = a + b;
-                        const REAL P = vrcp(a * b * s);
-                        const REAL Pw = p.w * P;
-                        const REAL m = Pw * P * (b * (s + a));
-                        Ec[k] += Pw; Uc[k] += m; Wc[k] = fma(m, r2, Wc[k]);
-                        const REAL Pc = rwi[k] * P;
-                        const REAL mc = Pc * P * (a * (s + b));
-                        ce += Pc; cu += mc; cw = fma(mc, r2, cw);
+                        const REAL ab = a * b;
+                        const REAL P = vrcp(ab * s);
+                        const REAL q = P * P;
+                        const REAL m = (p.w * q) * fma(b, s, ab);     // b (s + a) = b s + a b
+                        Ec[k] = fma(p.w, P, Ec[k]); Uc[k] += m; Wc[k] = fma(m, r2, Wc[k]);
+                        const REAL mc = (rwi[k] * q) * fma(a, s, ab); // a (s + b) = a s + a b
+                        ce = fma(rwi[k], P, ce); cu += mc; cw = fma(mc, r2, cw);
                     }
                     cE[jl] = ce; cU[jl] = cu; cW[jl] = cw;
                 }
