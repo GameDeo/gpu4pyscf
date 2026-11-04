@@ -185,3 +185,36 @@ A100, Bisphenol A, plain FP64 path, no approximation: one `nr_rks` 0.484 -> 0.43
 same energy, same gradient error. 102 existing + new tests pass on A100.
 The remaining A100 XC host time is ~100k Python calls per evaluation (per-block launch of ~14 small kernels in the MGGA
 rho path, ~7 in the Vxc path): next step is one batched GEMM + one fused rho kernel per block.
+
+
+## Round 3: INT8 residue (CRT / Ozaki-II) GEMMs  (T4, Bisphenol A, def2-TZVP, wB97M-V, DF, default grids)
+Own implementation, `gpu4pyscf/lib/crt_gemm.py` (design notes in `crt_int8.py`): operands are scaled per row by a power of two,
+quantized to q-bit integers, reduced modulo n coprime moduli <= 256 (balanced int8 residues; fused integer kernels), the n residue
+products are exact int8 x int8 -> int32 cuBLAS GEMMs (one strided-batched call), and Garner's balanced mixed-radix CRT in double
+recovers the result.  n moduli ~ 8n bits of product range, q = (8n - log2 K - 1) / 2 operand bits (cap 52).
+
+### Micro-benchmark (624 x 624, K = 61440, AO-like synthetic operands; native FP64 = 238 ms = 0.20 TFLOP/s)
+| moduli | max rel. error | quantize (2 operands) | INT8 GEMMs | total | speedup |
+|---|---|---|---|---|---|
+| 8 | 9e-7 | 13.4 ms | 10.4 ms | 22.5 ms | 10.6x |
+| 10 | 9e-9 | 14.0 | 12.7 | 25.6 | 9.3x |
+| 12 (int64 path) | 2.6e-11 | 20.5 | 14.4 | 35.8 | 6.6x |
+| 14 (int64 path) | 4.7e-13 | 20.3 | 17.6 | 38.5 | 6.2x |
+INT8 GEMM ~37 TOPS achieved (130 peak, power-capped T4).  Per XC block (nao_sub 500, K = 4 x 16384 batched moduli): 4.0 ms vs 55 ms FP64 (13.7x).
+
+### Integration (`XC_PRECISION='crt'`, `K_PRECISION='crt'`, `CDERI_PRECISION='crt'`; tests: `gpu4pyscf/dft/tests/test_xc_crt.py`)
+* XC vmat (one GEMM over (component, grid) per block), rho (transposing quantize kernel: AO layout [k][g] feeds the TN INT8 GEMM),
+  NLC-grid rho and vmat, both DF-K contractions (the DF tensor [i, j, L] is quantized in its native layout), and the aux-metric
+  transform j3c @ L^-T of the DF build.
+* Full SCF, plain (no staging), 11 moduli XC/K: E = -731.6494045106 (|dE| 3e-10 vs FP64), 249.7 s (FP64 T4) -> 81.7 s (first
+  version) -> 63.8 s (batched GEMM, transposing quantize, INT8 rho and K1) -> 57.9 s (NLC grid on INT8).
+* DF build: FP64 4.70 s -> 1.38 s per build.  With 14 moduli the result had a 5e-9 Eh energy shift: the 2^-48 operand truncation
+  is amplified by the large entries of L^-T (FP64 GEMM vs long double: 1.4e-14; CRT n=14: 5e-12; n=15 with 52-bit operands and
+  three-limb residues: 3.6e-13) -> default 15 moduli, dE back to 1.4e-10.
+* Merged the agent's symmetric tiled VV10 kernel (`dft/vv10_kernels.py`): T4, N=303k: FP64 20.1 -> 12.4 s (exact), FP32 1.0 -> 0.69 s;
+  A100 (agent): FP64 1.49x, FP32 3.6x vs libgdft.
+* Coarse-grid first stage (new, architecture independent): coarse (50,194) grid, 8 moduli, |g| < 1e-3, then full grid 11 moduli
+  (`ladder_test.py`): 58.1 s -> 46.4 s.  Coarser (30,110): 45.6 s, loose 1e-2: 50.1 s; a modulus ladder inside the full-grid stage
+  gives nothing (fixed per-cycle costs); stopping the full-grid stage at 8 moduli never reaches the threshold (14 cycles).
+* Integrated as `mf.mixed_precision = {'scheme': 'crt'}` ('auto' picks it on sm_75/86/87/89), final_grad_factor 0.1:
+  SCF 48.7 s, dE 1.4e-10 Eh, max gradient error 1.2e-7 (factor 1.0: 45.7 s but 8.2e-7).  Gradient (still FP64): 22.8 s.
