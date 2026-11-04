@@ -109,3 +109,53 @@ FP32 VV10 alone does not degrade the gradient (5.2e-7 vs 5.1e-7 for FP64).
   Slicing in cupy elementwise ops is far too slow (334 ms for the K=61440 operands; FP64 ops on a 1/32-rate GPU):
   a fused integer-arithmetic slicing kernel is required before this can be used inside the XC loop.
 * Static operands (the DF tensor) can be sliced once; the precision ladder is then the number of slices used.
+
+
+## Round 2 (T4, Bisphenol A, def2-TZVP, wB97M-V, DF, default grids)
+
+### Where one FP64 XC evaluation goes (kernel-level profile, `profile_xc_kernels.py`, T4)
+| | FP64 `nr_rks` (8.64 s) | FP32 `nr_rks` (1.50 s) |
+|---|---|---|
+| GEMM | 8.30 s (95 %) | 0.69 s (cuBLAS 0.47 + cuTENSOR 0.22) |
+| AO evaluation (gdft) | 0.36 s (4 %) | 0.33 s |
+| elementwise / casts | 0.08 s | 0.20 s |
+| idle / launch gaps | - | 0.28 s |
+So an FP64 XC evaluation is GEMM-bound (an INT8/TF32 emulation of those GEMMs is not Amdahl-limited), and the
+FP32 path is already within ~1.5x of its floor (5.8x faster than FP64).
+
+### Noise floor of each reduced-precision component (20 SCF cycles each, `noise_floor.py`)
+| configuration | self-consistent \|g\| plateau | E drift |
+|---|---|---|
+| XC FP32, K FP64, VV10 FP32 | 7e-6 .. 1e-5 | 5e-7 |
+| K FP32, XC FP64, VV10 FP32 | 8e-5 .. 1e-4 | 9e-7 |
+But the **FP64** gradient at the FP32-XC solution is ~4e-5, not 1e-5: the FP32 Fock is offset from the FP64 Fock
+(`xc_error_split.py`: rho stage contributes 1.8e-7, the Vxc-matrix stage 2.0e-5 in \|dg_ov\|_F). The offset is FP32
+accumulation over the 4096-point block (error ~ linear in chunk length: 1.0e-5 at 2048 points, 3.2e-6 at 128, 1.7e-6 at 64)
+and chunking costs 10x in time, so it is not a cheap fix. A reduced-precision stage can therefore replace most but not all
+of the FP64 polish: 2-3 exact Fock builds remain.
+
+### Staged scheme now: stage 1 (K,XC,VV10 reduced) -> stage 1b (K FP64, XC+VV10 reduced, plateau-detected) -> FP64
+| run (SCF only) | wall | FP64 cycles | dE vs tight ref | max gradient error |
+|---|---|---|---|---|
+| FP64 | 249.7 s | 12 | 4e-11 | 4.3e-7 |
+| staged, no stage 1b (round 1 scheme) | 123.0 s | 6 | 3.9e-10 | 1.3e-7 |
+| staged + 1b + FP32 NLC-grid XC (default) | 87.0 s | 1-2 | 3.7e-10 | 1.2e-7 |
+`final_grad_factor` 1.0 (threshold 3e-5, equal to plain FP64 default): 76 s but the gradient error is 1.7e-6 (fails the gate); 0.1 stays the default.
+
+### Gradient, exact restructuring (`grad/rks.py`)
+The XC gradient built three [nao, nao] matrices per block (15 GEMMs for MGGA) only to contract them with D.
+Contracting D into the weighted AO factors first needs 5 GEMMs, and applying D as C(C^T x) over the occupied orbitals
+costs nocc/nao = 0.14 of a dense product. Result identical to 1e-14 (4 tests: LDA/GGA/MGGA/wB97M-V).
+| Bisphenol A gradient, T4 | time |
+|---|---|
+| legacy | 39.8 s (47.1 s in the earlier full run) |
+| contract-first | 22.1 s |
+| + occupied-orbital factor | 17.2 s |
+Applies to every GPU (an FP64 tensor-core GPU also runs fewer FP64 FLOPs).
+
+### End to end (SCF + gradient, T4)
+| | SCF | gradient | total | dE | max grad error |
+|---|---|---|---|---|---|
+| original code, FP64 | 249.7 s | 47.1 s | 296.8 s | 4e-11 | 4.3e-7 |
+| mixed precision (this branch) | 87.0 s | 17.3 s | 104.3 s | 3.7e-10 | 1.2e-7 |
+(2.85x; SCF alone 2.9x.)  Remaining mixed-SCF budget: FP64-stage XC ~22 s, FP32-stage XC ~22 s, K 28 s, NLC 12.6 s (VV10 7.7 s).
