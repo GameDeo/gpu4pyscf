@@ -46,3 +46,15 @@ Always `colab stop`. An L4 runtime on the account is the user's side project, no
 * Tensor trains: QTT / tensor-structured Hartree-Fock (Khoromskij et al.) exists for small molecules; TT-cross handles nonlinear functions by sampling (pointwise evaluation of few points can be done at high precision on the vector unit);
   rank truncation needs SVD/QR (not ring-native). Pragmatic nearer-term relatives: THC / ISDF density fitting (K as pure GEMMs on grid points).
 * Self-correcting iterations tolerate low precision up to a noise floor; one precise final evaluation fixes the energy (this is what the staged scheme already exploits).
+
+### Revised TPU-oriented stack (theory only, nothing built or measured)
+* Order is: THC/ISDF (K and Coulomb as GEMMs on grid points) -> global fixed-point scale -> residues mod INT8 moduli (RNS)
+  -> INT8 GEMMs accumulated in the ring across blocks -> one CRT reconstruction per matrix. Nonlinear pieces (libxc, VV10 kernel,
+  TT-cross sampling) are evaluated pointwise at higher precision on the vector unit.
+* NTT is probably the wrong tool: it only accelerates true convolutions (e.g. grid Poisson), needs primes p = 1 mod 2n that do not fit INT8 moduli,
+  and THC points are irregular. "Quantize then reduce mod p" (not NTT) is what maps reals to the ring.
+* Block-scaled INT8 and RNS are one precision knob: ~8 bits per modulus, so the modulus count is the precision ladder (3-4 early cycles, 8-12 final).
+* MXU fill: small TT cores underfill 128x128 tiles; THC ranks in the thousands are fine. TT is partly redundant with THC.
+* Amdahl: on a matrix-unit-heavy chip VV10 (9 % of T4 SCF, 28 % of A100 SCF) and AO/libxc work become the critical path; recasting VV10 as
+  GEMMs (low-rank / separable kernel) matters more than the ring arithmetic.
+* First real tests are GPU-side: CRT micro-benchmark on T4, then THC-K with INT8 on T4.
