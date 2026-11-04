@@ -600,6 +600,8 @@ class Grids(lib.StreamObject):
         self.non0tab = None
         self.screen_index = None
         self._non0ao_idx = None
+        self._non0ao_idx_views = None
+        self._xc_block_views = None
         return self
 
     gen_atomic_grids = lib.module_method(
@@ -736,6 +738,16 @@ class Grids(lib.StreamObject):
         if self._non0ao_idx is None:
             self._non0ao_idx = self._build_non0ao_idx_cache(opt)
 
+        # The per-block views of the sparse indices are rebuilt only when the cache or the device changes
+        # (splitting costs ~800 cupy view creations per call).
+        device_id = cp.cuda.Device().id
+        cached = getattr(self, '_non0ao_idx_views', None)
+        if cached is None or cached[0] is not self._non0ao_idx:
+            cached = self._non0ao_idx_views = (self._non0ao_idx, {})
+        views = cached[1].get(device_id)
+        if views is not None:
+            return views
+
         ((idx, idx_sections),
          (non0shl_idx, non0shl_idx_sections),
          ctr_offsets_slice,
@@ -744,7 +756,9 @@ class Grids(lib.StreamObject):
         non0shl_idx = cp.split(asarray(non0shl_idx, dtype=np.int32), non0shl_idx_sections)
         ao_loc_slice = cp.split(asarray(ao_loc_slice, dtype=np.int32), ao_loc_slice_sections)
         paddings = [0] * len(idx)
-        return list(zip(paddings, idx, non0shl_idx, ctr_offsets_slice, ao_loc_slice))
+        views = list(zip(paddings, idx, non0shl_idx, ctr_offsets_slice, ao_loc_slice))
+        cached[1][device_id] = views
+        return views
 
     def to_cpu(self):
         grids = gen_grid_cpu.Grids(self.mol)
