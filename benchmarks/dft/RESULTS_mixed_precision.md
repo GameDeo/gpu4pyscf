@@ -277,3 +277,10 @@ than FP64 on the A100 (XC 0.705 vs 0.218 s/call: FP64 tensor cores + memory-boun
   (coarse stage + FP32/FP64 stages) is neutral on A100 (13.1 s, 5.7 s) -> its coarse stage is now off by default; plain FP64 is the best A100 setting.
 * Finite-difference check of the analytic DF gradient (with grid response; PBE0 and wB97M-V, mix_outside/inside_kernel, crt): analytic - FD =
   1.15e-6 (h = 0.002 bohr) -> 2.9e-7 (h = 0.001): scales as h^2, i.e. FD truncation error; no inconsistency between the range-separated SCF and gradient.
+
+### Defect-corrected dual-grid SCF: go/no-go (T4, BPA, fixed densities of SCF cycles 3..9; `defect_test.py`)
+Defect = V(fine grid) - V(coarse grid (50,194), NLC (30,110)).  |Delta V_xc| = 1.8e-3 (relative to |V_xc| = 21: 8.5e-5), E_xc defect -3.1e-5, E_nlc defect +8e-5.
+Change of the defect between iterates: cycles 3->5: 1.1 % (XC), 1.6 % (NLC); 5->7: 0.1 %, 0.2 %; 7->9: 0.0 %; 3->9: 1.2 %, 1.8 %.  So the defect is smooth
+and a frozen defect from a nearly converged density leaves errors ~2e-6 in the Fock matrix.  Modelled gain on T4/BPA is only ~4 s though
+(fine cycle ~3.8 s replaced 4x by coarse cycles ~1.7 s each + two defect evaluations that cost a fine and a coarse XC+NLC): deferred until the coarse cycle
+gets cheaper (K and fixed costs now dominate it).
