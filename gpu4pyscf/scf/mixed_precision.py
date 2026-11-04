@@ -63,7 +63,8 @@ DEFAULTS = {
     # 'crt': coarse-grid CRT stage, then CRT (INT8-emulated FP64-class) full-grid SCF; 'classic': coarse grid (optional),
     # FP32 stage 1 / 1b and an FP64 final stage; 'auto' picks by GPU generation.
     'scheme': 'auto',
-    'coarse_grid': (50, 194),     # atom grid of the first SCF stage (None: full grid from the start)
+    'coarse_grid': 'auto',        # atom grid of the first SCF stage: 'auto' = (50, 194) for the 'crt' scheme, none for 'classic'
+                                  # (measured neutral on A100); None: full grid from the start
     'coarse_nlc_grid': (30, 110),  # NLC atom grid of the coarse stage (None: keep the NLC grid); VV10 is ~20 % of the SCF
     'coarse_conv_tol_grad': 1e-3,
     'coarse_conv_tol': 1e-2,
@@ -93,6 +94,8 @@ def get_options(mf):
         opt.update(cfg)
     if opt['scheme'] == 'auto':
         opt['scheme'] = _int8_scheme_default()
+    if opt['coarse_grid'] == 'auto':
+        opt['coarse_grid'] = (50, 194) if opt['scheme'] == 'crt' else None
     if opt['scheme'] == 'crt':
         # reduced precision of the coarse stage = few moduli; there is no separate FP32 stage
         for key in ('k_precision', 'xc_precision'):
