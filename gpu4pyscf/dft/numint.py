@@ -42,8 +42,12 @@ AO_ALIGNMENT = getattr(__config__, 'ao_aligned', 16)
 AO_THRESHOLD = 1e-10
 GB = 1024*1024*1024
 NLC_REMOVE_ZERO_RHO_GRID_THRESHOLD = 1e-10
-# Precision of the O(N^2) VV10 pair kernel: 'fp64' or 'fp32' (FP32 pair arithmetic,
-# compensated FP64 accumulation; see vv10.cu).
+# Pair kernel of the VV10 (U, W, E) sums.  'libgdft': the original CUDA kernel in
+# lib/gdft/vv10.cu; 'sym': tiled symmetric cupy RawKernel (gpu4pyscf/dft/vv10_kernels.py),
+# which evaluates every unordered pair once.  VV10_PRECISION='fp32' (only with
+# VV10_KERNEL='sym'; with 'libgdft' the FP32 kernel of vv10.cu: FP32 pair arithmetic with compensated FP64
+# accumulation) runs the pair arithmetic in FP32; it is meant for the early SCF cycles only.
+VV10_KERNEL = getattr(__config__, 'vv10_kernel', 'sym')
 VV10_PRECISION = getattr(__config__, 'vv10_precision', 'fp64')
 # Precision of the grid contractions (rho and the XC matrix build) in nr_rks, which are
 # GEMM-dominated and run in FP64 by default.  'fp32': AO values are cast to FP32 after the
@@ -405,25 +409,30 @@ def _vv10nlc(rho_drho, coords, weights, nlc_pars):
 
     rho_weight_i = rho_i * weights
 
-    U_i = cupy.empty(ngrids)
-    W_i = cupy.empty(ngrids)
-    E_i = cupy.empty(ngrids)
-    stream = cupy.cuda.get_current_stream()
-    uwe_kernel = (libgdft.VXC_vv10nlc_fock_eval_UWE_fp32 if VV10_PRECISION == 'fp32'
-                  else libgdft.VXC_vv10nlc_fock_eval_UWE)
-    err = uwe_kernel(
-        ctypes.cast(stream.ptr, ctypes.c_void_p),
-        ctypes.cast(U_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(W_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(E_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(coords.data.ptr, ctypes.c_void_p),
-        ctypes.cast(rho_weight_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(omega_i.data.ptr, ctypes.c_void_p),
-        ctypes.cast(kappa_i.data.ptr, ctypes.c_void_p),
-        ctypes.c_int(ngrids),
-    )
-    if err != 0:
-        raise RuntimeError('CUDA Error in vv10 Fock kernel')
+    if VV10_KERNEL == 'libgdft':
+        U_i = cupy.empty(ngrids)
+        W_i = cupy.empty(ngrids)
+        E_i = cupy.empty(ngrids)
+        stream = cupy.cuda.get_current_stream()
+        uwe_kernel = (libgdft.VXC_vv10nlc_fock_eval_UWE_fp32 if VV10_PRECISION == 'fp32'
+                      else libgdft.VXC_vv10nlc_fock_eval_UWE)
+        err = uwe_kernel(
+            ctypes.cast(stream.ptr, ctypes.c_void_p),
+            ctypes.cast(U_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(W_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(E_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(coords.data.ptr, ctypes.c_void_p),
+            ctypes.cast(rho_weight_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(omega_i.data.ptr, ctypes.c_void_p),
+            ctypes.cast(kappa_i.data.ptr, ctypes.c_void_p),
+            ctypes.c_int(ngrids),
+        )
+        if err != 0:
+            raise RuntimeError('CUDA Error in vv10 Fock kernel')
+    else:
+        from gpu4pyscf.dft import vv10_kernels
+        U_i, W_i, E_i = vv10_kernels.eval_UWE(
+            coords, rho_weight_i, omega_i, kappa_i, precision=VV10_PRECISION)
 
     #output
     exc = cupy.zeros(ngrids_full)
