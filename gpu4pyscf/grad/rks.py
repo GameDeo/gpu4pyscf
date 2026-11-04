@@ -493,12 +493,29 @@ def get_nlc_exc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
 
     ao_deriv = 2
     exc1 = cupy.zeros((nao,3))
+    # contract-first evaluation (see _exc1_block): D = C C^T applied as C (C^T x), no [3, nao, nao] matrices
+    c_occ = None
+    if not LEGACY_EXC_GRAD:
+        if nset == 1:
+            occ_mask = mo_occ > 0
+            c_occ = cupy.asarray(mo_coeff[:, occ_mask] * mo_occ[occ_mask]**.5, order='C')
+        else:
+            parts = []
+            for mc, mo in ((mo_coeff_0, mo_occ[0]), (mo_coeff_1, mo_occ[1])):
+                om = mo > 0
+                parts.append(mc[:, om] * mo[om]**.5)
+            c_occ = cupy.asarray(cupy.hstack(parts), order='C')
+        if float(cupy.abs(c_occ.dot(c_occ.T) - dm).max()) > 1e-8:
+            c_occ = None
     p1 = 0
     for ao_mask, mask, weight, coords \
             in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, max_memory):
         p0, p1 = p1, p1 + weight.size
         wv = vv_vxc[:,p0:p1] * weight
         wv[0] *= .5  # *.5 because vmat + vmat.T at the end
+        if not LEGACY_EXC_GRAD:
+            exc1[mask] += _exc1_block(ao_mask, wv, (c_occ[mask],) if c_occ is not None else dm[mask[:,None],mask], 'GGA')
+            continue
         vmat_tmp = _gga_grad_sum_(ao_mask, wv)
         #add_sparse(vmat, vmat_tmp, mask)
         dm_mask = dm[mask[:,None],mask]
