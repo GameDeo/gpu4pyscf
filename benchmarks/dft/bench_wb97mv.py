@@ -96,9 +96,10 @@ def main():
     p.add_argument('--verbose', type=int, default=4)
     p.add_argument('--max_memory', type=int, default=40000)
     p.add_argument('--vv10', default='fp64', choices=['fp64', 'fp32'], help='precision of the VV10 pair kernel')
-    p.add_argument('--kprec', default='fp64', choices=['fp64', 'fp32'], help='precision of the DF-K GEMMs (all iterations)')
+    p.add_argument('--kprec', default='fp64', choices=['fp64', 'fp32', 'crt'], help='precision of the DF-K GEMMs (all iterations)')
     p.add_argument('--mixed', default=None, choices=['fp32', 'tf32x3', 'auto'], help='staged mixed-precision SCF (K precision of stage 1)')
-    p.add_argument('--xcprec', default='fp64', choices=['fp64', 'fp32', 'tf32x3'], help='precision of XC grid GEMMs (all iterations)')
+    p.add_argument('--xcprec', default='fp64', choices=['fp64', 'fp32', 'tf32x3', 'crt'], help='precision of XC grid GEMMs (all iterations)')
+    p.add_argument('--crt_n', type=int, default=11, help='number of INT8 moduli for xcprec/kprec crt')
     p.add_argument('--final_grad_factor', type=float, default=None, help='stage-2 gradient-threshold factor of the staged scheme')
     p.add_argument('--no1b', action='store_true', help='disable stage 1b (FP64 K + reduced XC polish)')
     p.add_argument('--grad', action='store_true')
@@ -124,6 +125,8 @@ def main():
     _numint.VV10_PRECISION = args.vv10
     _df_jk.K_PRECISION = args.kprec
     _numint.XC_PRECISION = args.xcprec
+    _numint.XC_CRT_MODULI = args.crt_n
+    _df_jk.K_CRT_MODULI = args.crt_n
     install_timers()
     if args.profile:
         install_fine_timers()
