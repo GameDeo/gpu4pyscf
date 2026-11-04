@@ -66,6 +66,12 @@ DEFAULTS = {
     'coarse_grid': 'auto',        # atom grid of the first SCF stage: 'auto' = (50, 194) for the 'crt' scheme, none for 'classic'
                                   # (measured neutral on A100); None: full grid from the start
     'coarse_nlc_grid': (30, 110),  # NLC atom grid of the coarse stage (None: keep the NLC grid); VV10 is ~20 % of the SCF
+    # Opt-in: Lebedev order of the implicit-solvent surface (PCM lebedev_order / SMD sasa_ng) in the coarse stage, e.g. 17
+    # (110 points) or 23 (194) instead of 29 (302): the point-charge integrals of the reaction field are FP64 kernels
+    # whose cost is proportional to the number of surface points.  The final stage always uses the user's surface, so the
+    # converged result is unchanged; only the starting density of the final stage is slightly worse (CPU test, glycine /
+    # def2-TZVP: |g| at the hand-over 7.6e-4 for order 17, 2.3e-4 for order 23).
+    'coarse_solvent_lebedev': None,
     'coarse_conv_tol_grad': 1e-3,
     'coarse_conv_tol': 1e-2,
     'crt_moduli_coarse': 8,       # INT8 moduli (K and XC) in the coarse stage: ~1e-6 relative accuracy
@@ -165,6 +171,32 @@ def _coarse_grids(mf, grid, nlc_grid=None):
             mf.nlcgrids = full_nlc
 
 
+@contextlib.contextmanager
+def _coarse_solvent(mf, lebedev_order):
+    '''Run the coarse stage with a coarser solvent surface (see DEFAULTS['coarse_solvent_lebedev']).'''
+    sol = getattr(mf, 'with_solvent', None)
+    if lebedev_order is None or sol is None or getattr(sol, 'frozen', False):
+        yield
+        return
+    from pyscf.dft.LebedevGrid import LEBEDEV_ORDER
+    from gpu4pyscf.solvent import pcm, smd
+    if not isinstance(sol, (pcm.PCM, smd.SMD)):   # e.g. the CuEST wrapper locks its surface settings
+        yield
+        return
+    if LEBEDEV_ORDER[lebedev_order] >= LEBEDEV_ORDER[sol.lebedev_order]:
+        yield
+        return
+    sol_c = copy.copy(sol)         # shallow: shares mol; reset() rebinds every intermediate on the copy only
+    sol_c.lebedev_order = lebedev_order
+    sol_c.reset()
+    mf.with_solvent = sol_c
+    try:
+        yield
+    finally:
+        mf.with_solvent = sol
+        sol_c.reset()              # release the coarse surface and its dense matrices
+
+
 class _Plateau(Exception):
     '''Raised from the SCF callback when |g| stops improving (reduced-precision noise floor).'''
 
@@ -216,7 +248,8 @@ def run_fast_stage(mf, dm0, **kwargs):
     opt = get_options(mf)
     coarse = opt['coarse_grid'] if hasattr(mf, 'grids') else None
     if coarse is not None:
-        with _coarse_grids(mf, coarse, opt['coarse_nlc_grid']), fast_precision(opt):
+        with _coarse_grids(mf, coarse, opt['coarse_nlc_grid']), _coarse_solvent(mf, opt['coarse_solvent_lebedev']), \
+                fast_precision(opt):
             log.info('Mixed precision SCF, coarse stage: grid=%s K=%s XC=%s (moduli %s) VV10=%s conv_tol_grad=%g',
                      coarse, opt['k_precision'], opt['xc_precision'], opt.get('xc_moduli'),
                      opt['vv10_precision'], opt['coarse_conv_tol_grad'])

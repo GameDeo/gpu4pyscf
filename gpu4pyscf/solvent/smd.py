@@ -20,6 +20,7 @@ import numpy as np
 import cupy
 from pyscf import lib, gto
 from pyscf.data import radii
+from pyscf.data.elements import charge as charge_of_element
 from pyscf.dft.gen_grid import LEBEDEV_ORDER
 from gpu4pyscf.solvent import pcm, _attach_solvent
 from gpu4pyscf.solvent._solvent_data import solvent_db, resolve_solvent_name
@@ -78,13 +79,18 @@ try:
 except OSError:
     libsolvent = None
 
+def _atomic_numbers(mol):
+    '''Atomic numbers Z of the atoms, not mol.atom_charges(): the latter are the effective charges Z - ncore of ECP
+    atoms (25 for an iodine with a def2 ECP), which the CDS Fortran code would read as manganese.'''
+    return np.asarray([charge_of_element(e) for e in mol.elements], dtype=np.int32)
+
 def get_cds_legacy(smdobj):
     mol = smdobj.mol
     natm = mol.natm
     solvent_descriptors = smdobj.get_solvent_descriptors()
     soln, _, sola, solb, solg, _, solc, solh = solvent_descriptors
     #symbols = [mol.atom_s(ia) for ia in range(mol.natm)]
-    charges = np.asarray(mol.atom_charges(), dtype=np.int32, order='F')
+    charges = np.asarray(_atomic_numbers(mol), dtype=np.int32, order='F')
     coords = np.asarray(mol.atom_coords(unit='B'), dtype=np.float64, order='C')
     icds = 1 if smdobj.solvent.upper() == 'WATER' else 2
     dcds = np.empty([natm,3])
@@ -309,6 +315,9 @@ class SMD(lib.StreamObject):
 
     kernel = pcm.PCM.kernel
     _get_vind = pcm.PCM._get_vind
+    _ensure_vind = pcm.PCM._ensure_vind
+    _is_built = pcm.PCM._is_built
+    _solve_q_sym = pcm.PCM._solve_q_sym
     _get_qsym = pcm.PCM._get_qsym
     _get_vgrids = pcm.PCM._get_vgrids
     _get_v = pcm.PCM._get_v
