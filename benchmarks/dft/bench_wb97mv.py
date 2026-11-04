@@ -97,7 +97,7 @@ def main():
     p.add_argument('--max_memory', type=int, default=40000)
     p.add_argument('--vv10', default='fp64', choices=['fp64', 'fp32'], help='precision of the VV10 pair kernel')
     p.add_argument('--kprec', default='fp64', choices=['fp64', 'fp32'], help='precision of the DF-K GEMMs (all iterations)')
-    p.add_argument('--mixed', default=None, choices=['fp32', 'tf32x3'], help='staged mixed-precision SCF (K precision of stage 1)')
+    p.add_argument('--mixed', default=None, choices=['fp32', 'tf32x3', 'auto'], help='staged mixed-precision SCF (K precision of stage 1)')
     p.add_argument('--xcprec', default='fp64', choices=['fp64', 'fp32', 'tf32x3'], help='precision of XC grid GEMMs (all iterations)')
     p.add_argument('--final_grad_factor', type=float, default=None, help='stage-2 gradient-threshold factor of the staged scheme')
     p.add_argument('--no1b', action='store_true', help='disable stage 1b (FP64 K + reduced XC polish)')
@@ -134,7 +134,10 @@ def main():
     mf.nlcgrids.atom_grid = tuple(args.nlcgrid)
     mf.conv_tol = args.conv_tol
     if args.mixed:
-        mf.mixed_precision = {'k_precision': args.mixed, 'xc_precision': args.mixed}
+        if args.mixed == 'auto':   # K/XC precision chosen by GPU generation (FP64 on sm_80+)
+            mf.mixed_precision = {'vv10_precision': 'fp32'}
+        else:
+            mf.mixed_precision = {'k_precision': args.mixed, 'xc_precision': args.mixed}
         if args.final_grad_factor is not None:
             mf.mixed_precision['final_grad_factor'] = args.final_grad_factor
         if args.no1b:

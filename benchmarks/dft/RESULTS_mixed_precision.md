@@ -159,3 +159,20 @@ Applies to every GPU (an FP64 tensor-core GPU also runs fewer FP64 FLOPs).
 | original code, FP64 | 249.7 s | 47.1 s | 296.8 s | 4e-11 | 4.3e-7 |
 | mixed precision (this branch) | 87.0 s | 17.3 s | 104.3 s | 3.7e-10 | 1.2e-7 |
 (2.85x; SCF alone 2.9x.)  Remaining mixed-SCF budget: FP64-stage XC ~22 s, FP32-stage XC ~22 s, K 28 s, NLC 12.6 s (VV10 7.7 s).
+
+### A100 (SXM4-40GB), same Bisphenol A job - what the precision work does and does not buy there
+| | FP64 reference | mixed, auto precision (K/XC FP64, VV10 FP32) |
+|---|---|---|
+| SCF | 12.35 s (12 cycles) | 12.8 s (9 + 5 cycles, final_grad_factor 0.1); 12.0 s with factor 1.0 but gradient error 1.0e-6 |
+| NLC | 4.11 s | 3.1-3.4 s (FP32 VV10: the only real gain) |
+| gradient (new code) | 2.83 s | 2.37 s |
+| dE / max grad error | 1.4e-10 / 3.5e-7 | 6.6e-10 / 1.9e-7 |
+* Mixed precision gives **no end-to-end speedup on A100** at this size (FP64 tensor cores = FP32 SIMT throughput; the
+  reduced-precision path is only the 2x VV10 gain, offset by the extra FP64 cycles of the tighter staged threshold).
+  `mixed_precision` is opt-in and should be left off on FP64-tensor-core GPUs; `_default_gemm_precision()` now picks
+  FP64 K/XC there so the mode is at worst neutral.
+* The contract-first XC gradient is **not** faster on A100 (2.40 s legacy vs 2.43 s): the A100 gradient is not GEMM-bound.
+  Results identical to 1e-13.
+* One XC evaluation on A100 (FP64, 0.49 s wall) has only 0.245 s of GPU kernel time: GEMM 0.158 s, AO evaluation 0.061 s,
+  elementwise 0.019 s. **Half the wall time is idle gaps** (python/cupy launch overhead in the 2 x 260-block loops).
+  On this hardware the XC cost is orchestration, not arithmetic.
