@@ -494,7 +494,11 @@ class _DFHF:
 # contractions run in FP32 (no FP64 pipe involved) and each block's contribution is
 # accumulated into an FP64 vk.  The result has ~1e-6 relative accuracy; it is intended
 # for the early SCF iterations (see gpu4pyscf.scf.mixed_precision).
-K_PRECISION = 'fp64'   # 'fp64' | 'fp32' | 'tf32x3' (FP32 data, 3xTF32 tensor-core emulation of FP32 GEMM)
+K_PRECISION = 'fp64'   # 'fp64' | 'fp32' | 'tf32x3' (FP32 data, 3xTF32 tensor-core emulation of FP32 GEMM) | 'crt'
+# 'crt': both K contractions as FP64-class GEMMs emulated with INT8 residue products (gpu4pyscf.lib.crt_gemm),
+# real density with a single factor only (otherwise falls back to FP64).  K_CRT_MODULI INT8 moduli (~8 bits each).
+K_CRT_MODULI = 11
+K_CRT_BUDGET = 1.5e9   # bytes of int8 residue planes per sub-block of auxiliary functions
 
 _unpack_tril_fp32 = cupy.ElementwiseKernel(
     'raw float32 a, raw int32 pair_idx, int32 nao, int32 npairs',
@@ -572,6 +576,7 @@ def get_jk(dfobj, dms, hermi=0, with_j=True, with_k=True,
     if fp32_k and K_PRECISION == 'tf32x3':
         k_compute_desc = cutensor_lib.cutensor_backend.COMPUTE_DESC_3xTF32
     kdt = numpy.float32 if fp32_k else numpy.float64
+    crt_k = (with_k and K_PRECISION == 'crt' and dm_factor_mode == 0 and not numpy.iscomplexobj(dm_factor_l))
 
     def proc():
         factor_l = cp.asarray(dm_factor_l).reshape(nspin,-1,nao,nocc)
@@ -634,7 +639,19 @@ def get_jk(dfobj, dms, hermi=0, with_j=True, with_k=True,
                 auxvec = contract('np,Lp->nL', _dm_sparse, cderi_tril)
                 contract('nL,Lp->np', auxvec, cderi_tril, beta=1, out=vj)
 
-            if with_k:
+            if with_k and crt_k:
+                from gpu4pyscf.lib import crt_gemm
+                nL = len(cderi)
+                sub = max(1, int(K_CRT_BUDGET / (K_CRT_MODULI * nao * max(nao, nocc))))
+                for s in range(nspin):
+                    for n in range(n_dm):
+                        ct = cupy.ascontiguousarray(factor_l[s, n].T)[None]       # [1, nocc, nao]
+                        for l0 in range(0, nL, sub):
+                            l1 = min(nL, l0 + sub)
+                            rhok = crt_gemm.gemm_nt(cderi[l0:l1].reshape(1, (l1-l0)*nao, nao), ct, K_CRT_MODULI)
+                            rhok = rhok.reshape(l1-l0, nao, nocc)                  # [L, i, k]
+                            vk[s, n] += crt_gemm.gemm_nt(rhok, rhok, K_CRT_MODULI)
+            elif with_k:
                 if fp32_k:
                     cderi = _fill_symmetric_fp32(cderi_tril.astype(kdt), pair_idx32, nao, work32)
                 nL = len(cderi)
