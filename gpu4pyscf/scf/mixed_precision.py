@@ -87,8 +87,11 @@ def run_fast_stage(mf, dm0, **kwargs):
     log = logger.new_logger(mf)
     opt = get_options(mf)
     saved = mf.max_cycle
+    saved_tol = mf.conv_tol
     try:
         mf.max_cycle = min(saved, opt['max_cycle'])
+        # _kernel reads mf.conv_tol and ignores its conv_tol argument
+        mf.conv_tol = opt['conv_tol']
         with fast_precision(opt):
             log.info('Mixed precision SCF, stage 1: K=%s XC=%s VV10=%s conv_tol_grad=%g',
                      opt['k_precision'], opt['xc_precision'], opt['vv10_precision'],
@@ -98,6 +101,7 @@ def run_fast_stage(mf, dm0, **kwargs):
                 callback=None, conv_check=False, **kwargs)
     finally:
         mf.max_cycle = saved
+        mf.conv_tol = saved_tol
     mf.cycles_stage1 = getattr(mf, 'cycles', -1)
     log.info('Mixed precision SCF, stage 1 done: E=%.12g converged=%s cycles=%s',
              e_tot, conv, mf.cycles_stage1)
