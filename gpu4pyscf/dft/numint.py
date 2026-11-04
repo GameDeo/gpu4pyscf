@@ -28,7 +28,7 @@ from gpu4pyscf.lib.cupy_helper import (
     contract, get_avail_mem, load_library, add_sparse, release_gpu_stack, transpose_sum,
     grouped_dot, grouped_gemm, reduce_to_device, take_last2d, ndarray,
     batched_vec_norm2, batched_vec_dot, MEMPOOL_THRESHOLD)
-from gpu4pyscf.dft import xc_deriv, libxc
+from gpu4pyscf.dft import xc_deriv, libxc, xc_fused
 from gpu4pyscf.lib import logger
 from gpu4pyscf.lib.multi_gpu import lru_cache
 from gpu4pyscf import __config__
@@ -56,6 +56,12 @@ XC_REDUCED_PARTS = ('rho', 'vmat')
 # Reduced-precision Vxc matrix: grid points per FP32 GEMM before the partial result is added to the FP64
 # accumulator (0 = a whole 4096-point block).  FP32 accumulation error grows ~sqrt(chunk).
 XC_VMAT_CHUNK = 0
+
+# Fused per-block kernels + merged GEMMs in the XC grid loops (see xc_fused.py).  False runs the original
+# chains of small cupy/gdft calls (same results up to summation order; kept for testing and comparison).
+XC_FUSED = getattr(__config__, 'xc_fused', True)
+# Meta-GGA Vxc build: one contraction over (component, grid point) of length 4*blksize instead of four.
+XC_MERGE_VMAT_GEMM = getattr(__config__, 'xc_merge_vmat_gemm', True)
 
 # Should we release the cupy cache?
 FREE_CUPY_CACHE = False
@@ -504,6 +510,122 @@ def _vmat_block_fp32(ao, wv, xctype, out):
         raise NotImplementedError(f'FP32 XC for {xctype}')
     return out
 
+def _eval_rho_blocks_mo(ni, mol, grids, nao, xctype, cpos_list, rho_list, grid_range, fp32=False):
+    '''
+    Density variables rho[:, p0:p1] = f(C_occ^T ao) block by block: one (batched) contraction
+    c = C^T [ao_0..ao_3] and one fused kernel per block (xc_fused.rho_from_c).
+    cpos_list: occupation-weighted occupied orbitals [nao, nocc] in the sorted AO order, one entry per
+    density; rho_list: the matching C-contiguous float64 [nvar, ngrids_local] outputs.  The AOs of a
+    block are evaluated once for all densities.
+    '''
+    ao_deriv = 0 if xctype in ('LDA', 'HF') else 1
+    ncomp = 1 if ao_deriv == 0 else 4
+    dtype = np.float32 if fp32 else np.float64
+    if fp32:
+        cpos_list = [x.astype(np.float32) for x in cpos_list]
+    nocc_max = max(x.shape[1] for x in cpos_list)
+    # zero-initialised: cuTENSOR evaluates alpha*A*B + beta*C also for beta == 0
+    cbuf = cupy.zeros(ncomp * nocc_max * MIN_BLK_SIZE, dtype=dtype)
+    cpos_buf = cupy.zeros(nao * nocc_max, dtype=dtype)
+    ao_buf = None
+    mm = _xc32_contract if fp32 else _xc_contract
+    p0 = 0
+    for ao_mask, idx, weight, _ in ni.block_loop(
+            mol, grids, nao, ao_deriv, max_memory=None, grid_range=grid_range):
+        ng = weight.shape[0]
+        nao_sub = idx.shape[0]
+        if nao_sub == 0:
+            for rho in rho_list:
+                rho[:, p0:p0+ng] = 0
+            p0 += ng
+            continue
+        ao = ao_mask
+        if fp32:
+            if ao_buf is None:
+                ao_buf = cupy.empty(ncomp * nao * MIN_BLK_SIZE, dtype=np.float32)
+            ao = cupy.ndarray(ao_mask.shape, dtype=np.float32, memptr=ao_buf.data)
+            ao[...] = ao_mask
+        for cpos_all, rho in zip(cpos_list, rho_list):
+            nocc = cpos_all.shape[1]
+            if nao_sub == nao:  # no screening in this block: idx is the identity
+                cpos = cpos_all
+            else:
+                cpos = cupy.ndarray((nao_sub, nocc), dtype=dtype, memptr=cpos_buf.data)
+                cupy.take(cpos_all, idx, axis=0, out=cpos)
+            if ncomp == 1:
+                c = cupy.ndarray((nocc, ng), dtype=dtype, memptr=cbuf.data)
+                mm('ki,kg->ig', cpos, ao, c)
+            else:
+                c = cupy.ndarray((ncomp, nocc, ng), dtype=dtype, memptr=cbuf.data)
+                mm('ki,nkg->nig', cpos, ao, c)
+            xc_fused.rho_from_c(rho, p0, c, ng, nocc, xctype)
+        p0 += ng
+
+def _vmat_blocks_fused(ni, mol, grids, nao, xctype, wv_list, vmat_list, grid_range, fp32=False):
+    '''
+    Accumulate the (unsymmetrised) XC matrices vmat_list[k] block by block for the weights wv_list[k]
+    (C-contiguous [nvar, ngrids_local], float32 if fp32).  Row 0 carries the 1/2 (GGA/MGGA), row 4 the 1/4
+    of the tau term, i.e. the matrix is  sum_x ao_x B_x^T  with B_0 = sum_x wv_x ao_x and (MGGA)
+    B_x = wv_4 ao_x.  With fp32 the contractions run in FP32 and each block is added to the FP64 vmat.
+    Blocks that touch all AOs are accumulated by the GEMM itself (beta=1) without an intermediate matrix.
+    '''
+    ao_deriv = 0 if xctype in ('LDA', 'HF') else 1
+    ncomp = 1 if ao_deriv == 0 else 4
+    ncomp_B = 4 if xctype == 'MGGA' else 1
+    dtype = np.float32 if fp32 else np.float64
+    bbuf = cupy.zeros(ncomp_B * nao * MIN_BLK_SIZE, dtype=dtype)
+    vtmp_buf = None
+    ao_buf = None
+    mm = _xc32_contract if fp32 else _xc_contract
+    p0 = 0
+    for ao_mask, idx, weight, _ in ni.block_loop(
+            mol, grids, nao, ao_deriv, max_memory=None, grid_range=grid_range):
+        ng = weight.shape[0]
+        nao_sub = idx.shape[0]
+        if nao_sub == 0:
+            p0 += ng
+            continue
+        ao = ao_mask
+        if fp32:
+            if ao_buf is None:
+                ao_buf = cupy.empty(ncomp * nao * MIN_BLK_SIZE, dtype=np.float32)
+            ao = cupy.ndarray(ao_mask.shape, dtype=np.float32, memptr=ao_buf.data)
+            ao[...] = ao_mask
+        if xctype == 'MGGA':
+            B = cupy.ndarray((4, nao_sub, ng), dtype=dtype, memptr=bbuf.data)
+        else:
+            B = cupy.ndarray((nao_sub, ng), dtype=dtype, memptr=bbuf.data)
+        direct = nao_sub == nao and not fp32
+        if not direct:
+            if vtmp_buf is None:
+                vtmp_buf = cupy.zeros(nao * nao, dtype=dtype)
+            vtmp = cupy.ndarray((nao_sub, nao_sub), dtype=dtype, memptr=vtmp_buf.data)
+        for wv, vmat in zip(wv_list, vmat_list):
+            xc_fused.build_B(B, ao, wv, p0, ng, nao_sub, xctype)
+            if direct:
+                out, beta = vmat, 1.
+            else:
+                out, beta = vtmp, 0.
+            if xctype == 'LDA':
+                mm('ig,jg->ij', ao, B, out, beta)
+            elif xctype == 'GGA':
+                mm('ig,jg->ij', ao[0], B, out, beta)
+            elif XC_MERGE_VMAT_GEMM:
+                mm('xig,xjg->ij', ao, B, out, beta)
+            else:
+                mm('ig,jg->ij', ao[0], B[0], out, beta)
+                for x in range(1, 4):
+                    mm('ig,jg->ij', ao[x], B[x], out, 1.)
+            if not direct:
+                if nao_sub == nao:   # FP32 block of the full matrix
+                    vmat += out
+                else:
+                    add_sparse(vmat, out.astype(np.float64) if fp32 else out, idx)
+        p0 += ng
+
+def _xc_contract(pattern, a, b, out, beta=0.):
+    return contract(pattern, a, b, beta=beta, out=out)
+
 def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                  verbose=None, with_lapl=False, device_id=0, hermi=1):
     ''' nr_rks task on given device
@@ -557,10 +679,18 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                    and xctype in ('LDA', 'GGA', 'MGGA'))
         fp32_rho = fp32_xc and 'rho' in XC_REDUCED_PARTS
         fp32_vmat = fp32_xc and 'vmat' in XC_REDUCED_PARTS
+        # (XC_VMAT_CHUNK splits the FP32 contraction of a block: only implemented in the unfused loop)
+        fused = (XC_FUSED and xctype in ('LDA', 'GGA', 'MGGA')
+                 and not (fp32_vmat and XC_VMAT_CHUNK > 0))
+        fused_rho = fused and mo_coeff is not None
+        if fused_rho:
+            assert hermi == 1
+            _eval_rho_blocks_mo(ni, _sorted_mol, grids, nao, xctype, [mo_coeff], [rho_tot],
+                                (grid_start, grid_end), fp32=fp32_rho)
         p0 = p1 = 0
-        for ao_mask, idx, weight, _ in ni.block_loop(
+        for ao_mask, idx, weight, _ in (() if fused_rho else ni.block_loop(
                 _sorted_mol, grids, nao, ao_deriv, max_memory=None,
-                grid_range=(grid_start, grid_end)):
+                grid_range=(grid_start, grid_end))):
             p0, p1 = p1, p1 + weight.size
             nao_sub = len(idx)
             #TODO: If AO is sparse enough, use density matrix to calculate rho
@@ -597,12 +727,23 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
             if xctype == 'GGA':
                 wv[0] *= .5
             if xctype == 'MGGA':
-                wv[[0,4]] *= .5
+                if fused:
+                    # 1/2 of the GGA part; 1/2 (tau definition) * 1/2 (symmetrisation) of the tau part
+                    wv[0] *= .5
+                    wv[4] *= .25
+                else:
+                    wv[[0,4]] *= .5
         exc = den = vxc = rho_tot = weights = None
         t0 = log.timer_debug1(f'eval vxc on Device {device_id}', *t0)
 
-        vtmp_buf = cupy.empty(nao*nao)
         vmat = cupy.zeros((nao, nao))
+        if fused:
+            _vmat_blocks_fused(ni, _sorted_mol, grids, nao, xctype,
+                               [wv.astype(np.float32) if fp32_vmat else wv], [vmat],
+                               (grid_start, grid_end), fp32=fp32_vmat)
+            t0 = log.timer_debug1(f'eval integration on {device_id}', *t0)
+            return vmat, nelec, excsum
+        vtmp_buf = cupy.empty(nao*nao)
         if fp32_vmat:
             wv32 = wv.astype(np.float32)
             vtmp32_buf = cupy.zeros(nao*nao, dtype=np.float32)
@@ -996,10 +1137,19 @@ def _nr_uks_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
             mo_buf = cupy.empty(nao*max(nocc_alpha, nocc_beta))
             buf= cupy.empty(MIN_BLK_SIZE * max(2*nocc_alpha, 2*nocc_beta, nao))
 
+        fused = XC_FUSED and xctype in ('LDA', 'GGA', 'MGGA')
+        fused_rho = fused and mo_coeff is not None
+        if fused_rho:
+            assert hermi == 1
+            _eval_rho_blocks_mo(
+                ni, _sorted_mol, grids, nao, xctype,
+                [mo_coeff_alpha, mo_coeff_beta] * nset,
+                [rho_tot[s, i] for i in range(nset) for s in (0, 1)],
+                (grid_start, grid_end))
         p0 = p1 = 0
-        for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv,
-                                                     max_memory=None,
-                                                     grid_range=(grid_start, grid_end)):
+        for ao_mask, idx, weight, _ in (() if fused_rho else ni.block_loop(
+                _sorted_mol, grids, nao, ao_deriv, max_memory=None,
+                grid_range=(grid_start, grid_end))):
             p0, p1 = p1, p1 + weight.size
             nao_sub = len(idx)
             for i in range(nset):
@@ -1042,13 +1192,25 @@ def _nr_uks_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
             if xctype == 'GGA':
                 wv[:,:,0] *= .5
             if xctype == 'MGGA':
-                wv[:,:,[0,4]] *= .5
+                if fused:
+                    wv[:,:,0] *= .5
+                    wv[:,:,4] *= .25
+                else:
+                    wv[:,:,[0,4]] *= .5
         else:
             excsum = np.zeros(nset)
         exc = vxc = rho_tot = weights = None
         t0 = log.timer_debug1(f'eval vxc on Device {device_id}', *t0)
         vmata = cupy.zeros((nset, nao, nao))
         vmatb = cupy.zeros((nset, nao, nao))
+        if fused:
+            _vmat_blocks_fused(
+                ni, _sorted_mol, grids, nao, xctype,
+                [wv[i, s] for i in range(nset) for s in (0, 1)],
+                [(vmata, vmatb)[s][i] for i in range(nset) for s in (0, 1)],
+                (grid_start, grid_end))
+            t0 = log.timer_debug1(f'eval integration on {device_id}', *t0)
+            return nelec, excsum, (vmata, vmatb)
         vtmp_buf = cupy.empty(nao*nao)
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv,
@@ -1792,8 +1954,16 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
         occ_mask = mo_occ > 0
         cpos_all = cupy.asarray(mo_coeff[:, occ_mask], order='C') * mo_occ[occ_mask]**.5
         cpos_all = cpos_all.astype(np.float32)
+    fused = XC_FUSED and mo_coeff is not None and mo_coeff.ndim == 2
+    if fused:
+        if not fp32_xc:
+            occ_mask = mo_occ > 0
+            cpos_all = cupy.asarray(mo_coeff[:, occ_mask], order='C') * mo_occ[occ_mask]**.5
+        rho = cupy.empty((4, grids.coords.shape[0]))
+        _eval_rho_blocks_mo(ni, _sorted_mol, grids, nao, 'GGA', [cpos_all], [rho], None, fp32=fp32_xc)
+        vvrho = ()
     for ao, idx, weight, coords \
-            in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, max_memory=max_memory):
+            in (() if fused else ni.block_loop(_sorted_mol, grids, nao, ao_deriv, max_memory=max_memory)):
         if fp32_xc:
             rho = _eval_rho2_fp32(ao.astype(np.float32), cpos_all[idx], 'GGA').astype(np.float64)
         elif mo_coeff is None:
@@ -1805,7 +1975,8 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
             rho += eval_rho2(_sorted_mol, ao, mo_coeff[1,idx,:], mo_occ[1], None, 'GGA')
         vvrho.append(rho)
 
-    rho = cupy.hstack(vvrho)
+    if not fused:
+        rho = cupy.hstack(vvrho)
     t1 = log.timer_debug1('eval rho', *t0)
     exc = 0
     vxc = 0
@@ -1824,8 +1995,13 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
 
     vmat = cupy.zeros((nao,nao))
     p1 = 0
+    if fused:
+        wv = cupy.ascontiguousarray(vv_vxc * grids.weights)
+        wv[0] *= .5
+        _vmat_blocks_fused(ni, _sorted_mol, grids, nao, 'GGA',
+                           [wv.astype(np.float32) if fp32_xc else wv], [vmat], None, fp32=fp32_xc)
     for ao, mask, weight, coords \
-            in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, max_memory=max_memory):
+            in (() if fused else ni.block_loop(_sorted_mol, grids, nao, ao_deriv, max_memory=max_memory)):
         p0, p1 = p1, p1 + weight.size
         wv = vv_vxc[:,p0:p1] * weight
         wv[0] *= .5
@@ -2120,6 +2296,45 @@ def _sparse_index(mol, coords, l_ctr_offsets, ao_loc, opt=None):
     t1 = log.timer_debug2('init ao sparsity', *t1)
     return pad, idx, non0shl_idx, ctr_offsets_slice, ao_loc_slice
 
+def _grid_block_views(grids):
+    '''
+    Per-block (coords, weights, F-ordered coords) of the MIN_BLK_SIZE-point blocks of grids, cached on
+    the grids object (per device).  coords/weights are views; the F-ordered coordinates (the layout the
+    AO kernel reads) are produced for all full blocks with one transposing copy instead of one per block
+    and per block loop.
+    '''
+    device_id = cupy.cuda.Device().id
+    cache = getattr(grids, '_xc_block_views', None)
+    if cache is not None:
+        ent = cache.get(device_id)
+        if (ent is not None and ent[0] is grids.coords and ent[1] is grids.weights
+                and ent[2] == MIN_BLK_SIZE):
+            return ent[3]
+    else:
+        cache = grids._xc_block_views = {}
+
+    coords_all = cupy.asarray(grids.coords)
+    weights_all = cupy.asarray(grids.weights)
+    ngrids = coords_all.shape[0]
+    nblk = (ngrids + MIN_BLK_SIZE - 1) // MIN_BLK_SIZE
+    nfull = ngrids // MIN_BLK_SIZE
+    views = []
+    if nfull > 0:
+        # [nfull, 3, blk]: block b, transposed, is an F-contiguous (blk, 3) matrix with leading dim blk
+        coords_f_full = cupy.ascontiguousarray(
+            coords_all[:nfull*MIN_BLK_SIZE].reshape(nfull, MIN_BLK_SIZE, 3).transpose(0, 2, 1))
+    for b in range(nblk):
+        ip0 = b * MIN_BLK_SIZE
+        ip1 = min(ip0 + MIN_BLK_SIZE, ngrids)
+        coords = coords_all[ip0:ip1]
+        if b < nfull:
+            coords_f = coords_f_full[b].T
+        else:
+            coords_f = cupy.asarray(coords, order='F')
+        views.append((coords, weights_all[ip0:ip1], coords_f))
+    cache[device_id] = (grids.coords, grids.weights, MIN_BLK_SIZE, views)
+    return views
+
 def _block_loop(ni, mol, grids, nao=None, deriv=0, max_memory=2000,
                 non0tab=None, blksize=None, buf=None, extra=0, grid_range=None):
     '''
@@ -2173,24 +2388,24 @@ def _block_loop(ni, mol, grids, nao=None, deriv=0, max_memory=2000,
     non0ao_idx = grids.get_non0ao_idx(opt)
     nao_max = max(len(x[1]) for x in non0ao_idx[block_start:block_end])
     buf = cupy.empty((comp, nao_max, MIN_BLK_SIZE), order='C')
+    # per-block views of coords/weights and the F-ordered coordinates eval_ao needs: created once per grids
+    block_views = _grid_block_views(grids)
+    buf_ptr = buf.data
 
     for block_id in range(block_start, block_end):
         pad, idx, non0shl_idx, ctr_offsets_slice, ao_loc_slice = non0ao_idx[block_id]
         nao_sub = len(idx)
 
-        ip0 = block_id * MIN_BLK_SIZE
-        ip1 = min(ip0 + MIN_BLK_SIZE, ngrids)
-        coords = cupy.asarray(grids.coords[ip0:ip1])
-        weight = cupy.asarray(grids.weights[ip0:ip1])
+        coords, weight, coords_f = block_views[block_id]
 
         # Note: do NOT skip when nao_sub == 0, it'll mess up the grid order!
 
         ao_mask = eval_ao(
-            _sorted_mol, coords, deriv,
+            _sorted_mol, coords_f, deriv,
             screening_info=(nao_sub, non0shl_idx, ao_loc_slice, ctr_offsets_slice),
             gdftopt=opt,
             transpose=False,
-            out=cupy.ndarray((comp,nao_sub,ip1-ip0), memptr=buf.data))
+            out=cupy.ndarray((comp,nao_sub,coords.shape[0]), memptr=buf_ptr))
 
         if pad > 0:
             if deriv == 0:
