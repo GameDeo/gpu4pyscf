@@ -70,6 +70,14 @@ scf.hf.RHF.PCM = pcm_for_scf
 scf.uhf.UHF.PCM = pcm_for_scf
 tdscf.rhf.TDBase.PCM = pcm_for_tdscf
 
+def _total_dm(dms):
+    '''Spin-summed (nao, nao) cupy density, the object the surface potential is a function of.'''
+    nao = dms.shape[-1]
+    dms = cupy.asarray(dms).reshape(-1, nao, nao)
+    if dms.shape[0] == 2:
+        return dms[0] + dms[1]
+    return dms[0]
+
 def natm_without_ghost(mol):
     return sum(1 for element in mol.elements if not is_ghost_atom(element))
 
@@ -683,9 +691,31 @@ class PCM(lib.StreamObject):
         self.e, self.v = self._get_vind(dm)
         return self.e, self.v
 
-    def _get_vind(self, dms):
-        if (not self._intermediates or
-            not any(isinstance(x, cupy.ndarray) for x in self._intermediates.values())):
+    def _is_built(self):
+        '''True if the surface and the dense/matrix-free intermediates exist (the old test "any cupy array in
+        _intermediates" is False after build() in the low-memory C-PCM mode and rebuilt the surface a second time
+        inside the first _get_vind).'''
+        return (bool(self._intermediates) and 'f_epsilon' in self._intermediates
+                and getattr(self, 'intopt', None) is not None and self.v_grids_n is not None)
+
+    def _solve_q_sym(self, v_grids):
+        '''q = K^-1 R v and q_sym = (K^-1 R + R^T K^-T)/2 v for v_grids of shape [n_dm, ngrids].
+        Returns (q_sym, q), both [n_dm, ngrids].'''
+        b = self.left_multiply_R(v_grids.T)
+        q = self.left_solve_K(b).T
+        if self.if_method_in_CPCM_category:
+            # R = -f_epsilon * 1 and K = S is symmetric: K^-1 R == R^T K^-T, the second solve is redundant.
+            return q.copy(), q
+        vK_1 = self.left_solve_K(v_grids.T, K_transpose = True)
+        qt = self.left_multiply_R(vK_1, R_transpose = True).T
+        return (q + qt)/2.0, q
+
+    def _get_vind(self, dms, with_vmat=True):
+        '''Solvent energy and Fock contribution for the (spin-summed) density dms.
+        The converged charges and the density they belong to are cached in self._intermediates
+        (keys q, q_sym, v_grids, dm), which the gradient and Hessian routines reuse instead of re-solving.
+        with_vmat=False skips the second int1e_grids call (the Fock matrix) and returns (epcm, None).'''
+        if not self._is_built():
             self.build()
         assert dms is not None
         v_left = self._get_vgrids(dms, with_nuc = True)
@@ -695,14 +725,9 @@ class PCM(lib.StreamObject):
             frozen_dm0 = self.frozen_dm0_for_finite_difference_without_response
             v_right = self._get_vgrids(frozen_dm0, with_nuc = True)
 
-        b = self.left_multiply_R(v_right.T)
-        q = self.left_solve_K(b).T
+        q_sym, q = self._solve_q_sym(v_right)
 
-        vK_1 = self.left_solve_K(v_right.T, K_transpose = True)
-        qt = self.left_multiply_R(vK_1, R_transpose = True).T
-        q_sym = (q + qt)/2.0
-
-        vmat = self._get_vmat(q_sym)
+        vmat = self._get_vmat(q_sym) if with_vmat else None
         epcm = 0.5 * cupy.dot(v_left[0], q_sym[0])
         if self.frozen_dm0_for_finite_difference_without_response is not None:
             # This factor of two originates from the derivative of the PCM energy:
@@ -727,26 +752,36 @@ class PCM(lib.StreamObject):
         self._intermediates['q'] = q[0]
         self._intermediates['q_sym'] = q_sym[0]
         self._intermediates['v_grids'] = v_right[0]
-        return epcm, vmat[0]
+        if self.frozen_dm0_for_finite_difference_without_response is None:
+            # Same convention as the PySCF CPU implementation (and the consumers in grad/ and hessian/, which compare
+            # their density with this entry).  With a frozen right-hand density q does not belong to dms: no caching.
+            self._intermediates['dm'] = cupy.array(_total_dm(dms), copy=True)  # plain ndarray, no tag attributes
+        else:
+            self._intermediates.pop('dm', None)
+        return epcm, (vmat[0] if vmat is not None else None)
+
+    def _ensure_vind(self, dm):
+        '''Make q, q_sym, v_grids in self._intermediates belong to dm.  The converged SCF density is normally the one the
+        last get_veff used, so the gradient / Hessian reuse its charges; otherwise (different density, frozen right-hand
+        density, ...) the response is re-solved once, without forming the Fock matrix.'''
+        if not self._is_built():
+            self.build()
+        cached = self._intermediates.get('dm', None)
+        if cached is not None and self.frozen_dm0_for_finite_difference_without_response is None:
+            dm_tot = _total_dm(dm)
+            if dm_tot.shape == cached.shape and float(cupy.linalg.norm(cached - dm_tot)) < 1e-10:
+                return
+        self._get_vind(dm, with_vmat=False)
 
     def _get_qsym(self, dms, with_nuc = False):
-        if (not self._intermediates or
-            not any(isinstance(x, cupy.ndarray) for x in self._intermediates.values())):
+        if not self._is_built():
             self.build()
         v_grids = self._get_vgrids(dms, with_nuc)
-
-        b = self.left_multiply_R(v_grids.T)
-        q = self.left_solve_K(b).T
-
-        vK_1 = self.left_solve_K(v_grids.T, K_transpose = True)
-        qt = self.left_multiply_R(vK_1, R_transpose = True).T
-        q_sym = (q + qt)/2.0
-
+        q_sym, q = self._solve_q_sym(v_grids)
         return q_sym[0], q[0]
 
     def _get_vgrids(self, dms, with_nuc = False):
-        if (not self._intermediates or
-            not any(isinstance(x, cupy.ndarray) for x in self._intermediates.values())):
+        if not self._is_built():
             self.build()
         nao = dms.shape[-1]
         dms = dms.reshape(-1,nao,nao)
@@ -818,8 +853,7 @@ class PCM(lib.StreamObject):
         return self
 
     def _B_dot_x(self, dms):
-        if (not self._intermediates or
-            not any(isinstance(x, cupy.ndarray) for x in self._intermediates.values())):
+        if not self._is_built():
             self.build()
         if self.frozen_dm0_for_finite_difference_without_response is not None:
             dms = self.frozen_dm0_for_finite_difference_without_response
@@ -828,14 +862,7 @@ class PCM(lib.StreamObject):
         dms = dms.reshape(-1,nao,nao)
 
         v_grids = -self._get_v(dms)
-
-        b = self.left_multiply_R(v_grids.T)
-        q = self.left_solve_K(b).T
-
-        vK_1 = self.left_solve_K(v_grids.T, K_transpose = True)
-        qt = self.left_multiply_R(vK_1, R_transpose = True).T
-        q_sym = (q + qt)/2.0
-
+        q_sym, _ = self._solve_q_sym(v_grids)
         vmat = self._get_vmat(q_sym)
         return vmat.reshape(out_shape)
 
@@ -853,10 +880,14 @@ class PCM(lib.StreamObject):
             if not getattr(self, "lowmem_intermediate_storage", False):
                 A = self._intermediates['A']
                 D = self._intermediates['D']
-                DA = D*A
+                # DA = D*A (column scaling) is never formed: it is an [n,n] temporary (0.4-1 GB for 7-11k surface
+                # points) that was re-allocated twice per SCF cycle.  DA x = D (A x), (DA)^T x = A (D^T x).
+                Ac = A.reshape((-1,) + (1,) * (right_vector.ndim - 1))
                 if R_transpose:
-                    DA = DA.T
-                return -f_epsilon * (right_vector - 1.0/(2.0*PI) * cupy.dot(DA, right_vector))
+                    DAx = Ac * cupy.dot(D.T, right_vector)
+                else:
+                    DAx = cupy.dot(D, Ac * right_vector)
+                return -f_epsilon * (right_vector - 1.0/(2.0*PI) * DAx)
             else:
                 A = self._intermediates['A']
                 if not R_transpose:

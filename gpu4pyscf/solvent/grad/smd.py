@@ -85,7 +85,6 @@ class WithSolventGrad:
         logger.debug(self, 'Compute gradients from solutes')
         self.de_solute  = super().kernel(*args, **kwargs)
 
-        dm = kwargs.pop('dm', None)
         if dm is None:
             dm = self.base.make_rdm1()
         if dm.ndim == 3:
