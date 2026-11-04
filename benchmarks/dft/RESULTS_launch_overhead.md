@@ -70,4 +70,63 @@ Not done (and why):
   GPU-bound on the A100 estimate below, so it is not needed.  (UNVERIFIED)
 * Larger grid blocks (`min_grid_blksize`): the sparse-AO machinery is built per block; not changed.
 
-RESULTS_PLACEHOLDER
+## 3. Results (MEASURED on a Tesla T4, own session; Bisphenol A, wB97M-V, def2-TZVP, (99,590) grid = 1.06 M points, 623 AO)
+
+`bench_launch_overhead.py`, fixed density from a 2-cycle SCF, best of 2 after warm-up.  "old" = the pristine tree
+(d8efa52, same built libraries); "new" = this branch with `numint.XC_FUSED=True`.  Python calls = cProfile
+`total_calls`; kernels / GPU busy = torch profiler (all CUDA kernels, including those of cuBLAS/cuTENSOR/gdft).
+
+| call | wall old -> new | Python calls old -> new | CUDA kernels old -> new | GPU busy old -> new | max rel. diff new vs legacy loops |
+|---|---|---|---|---|---|
+| `nr_rks`, FP64 | 8.47 -> 7.71 s (1.10x) | 106,607 -> 33,364 | 15,306 -> 5,989 | 8.57 -> 7.66 s | 2.8e-15 |
+| `nr_rks`, FP32 contractions | 1.53 -> 1.04 s (1.47x) | 139,635 -> 34,938 | 19,472 -> 6,845 | 1.25 -> 1.03 s | 1.5e-6 (FP32 rounding, different accumulation) |
+| `nr_nlc_vxc`, FP64 | 8.62 -> 8.55 s | 15,727 -> 7,381 | 3,140 -> 1,325 | 8.57 -> 8.55 s | 2.0e-15 |
+| `grad.rks.get_exc` | 6.04 -> 4.93 s (1.23x) | 169,548 -> 77,677 | 29,799 -> 9,349 | 5.70 -> 4.99 s | 9.9e-15 |
+
+Same molecule, def2-SVP (launch-bound regime, 1.06 M points): `nr_rks` FP64 3.31 -> 2.78 s (1.19x),
+FP32 0.90 -> 0.52 s (1.74x); Python calls 106,596 -> 33,353.
+
+Reading the table:
+
+* **FP32 path (the T4 idle-gap problem from RESULTS_mixed_precision.md): idle time 0.28 s -> 0.005 s.** Wall time now equals
+  GPU busy time (1.038 vs 1.034 s).  What is left is GPU work: cuTENSOR/cutlass SGEMM 0.35 s, AO evaluation ~0.30 s, the
+  FP64->FP32 AO cast 0.15 s (2 per block, one in each loop; fusing it into the AO kernel needs a gdft change, not done),
+  `build_B` 0.05 s.
+* **FP64 on T4 is GEMM-bound (GPU busy ~ wall in both versions), so the launch savings do not show; the 10 % gain comes from the
+  merged GEMM**: `xig,xjg->ij` with K = 4*4096 runs as ONE cuTENSOR/cutlass kernel (260 launches, 6.13 s) instead of four
+  cuBLAS `volta_dgemm_64x64_tn` per block (1040 launches, 6.99 s).  With `XC_MERGE_VMAT_GEMM=False` the fused loop takes
+  8.40 s (= old).  Longer K helps here; whether it helps on an A100 is UNVERIFIED (flag provided).
+* 4,060 of the 5,989 remaining kernels are the gdft AO-evaluation kernels (one launch per contraction pattern and
+  angular momentum, inside `GDFTeval_gto`); the Python-visible launches are now ~7 per block and loop pair
+  (2 AO, 1 rho GEMM, 1 rho kernel, 1 build kernel, 1 Vxc GEMM, +take/+add_sparse for blocks that screen AOs) versus 37.
+* Host profile of the new FP64 `nr_rks` (cProfile, def2-SVP, GPU-bound on the T4, so launch-queue waits are included in the
+  callers' time): `eval_ao` 1.02 s tottime over 520 calls (the AO launches block when the queue is full),
+  cuTENSOR `contract` 0.27 s / 520 calls, `add_sparse` 0.23 s / 260, `build_B` 0.08 s / 260, libxc 0.03 s;
+  nothing else above 0.03 s.  33k Python calls in total = ~64 per block and loop (was ~205).
+* The XC gradient launched 115 kernels per block (29,799 / 260), now 36 (9,349 / 260), of which ~16 are AO-evaluation kernels.
+
+Correctness (T4, all pass): `dft/tests/test_xc_fused.py` (18 tests: fused vs original loops for LDA/GGA/MGGA, MO and
+density-matrix rho paths, a two-fragment molecule whose blocks screen AOs, UKS, NLC grid, FP32, gradient LDA/GGA/MGGA incl. the
+dense-dm branch and sparse blocks, determinism, kernel-vs-numpy), `test_numint.py` (41), `test_numint2c.py`, `test_xc_fp32.py`,
+`test_vv10_fp32.py`, `test_cutensor_plan_cache.py`, `test_exc_contract_first.py`, `test_grids.py`, `test_cupy_helper.py`,
+`grad/tests/test_rks_grad.py` (17), `test_uks_grad.py` (12), `dft/tests/test_rks.py` (17), `test_uks.py` (10), `test_rks_lowmem.py` (4), `df/tests/test_df_k_fp32.py`, `test_df_jk.py`, `grad/tests/test_vv10_grid.py`, `test_grid_response.py` (7), `test_lowmem_grad.py` (4).  Multi-GPU was not tested (single T4).
+
+## 4. Expectations NOT measured (A100/H100) -- UNVERIFIED
+
+* A100 FP64 `nr_rks` (0.489 s wall, 0.245 s GPU busy before; 0.43 s after the cuTENSOR plan cache): the T4 FP32 case
+  (same launch-bound structure: wall 1.45 s -> 1.04 s = GPU busy, idle gaps removed) suggests the wall time drops to roughly
+  the GPU busy time, i.e. ~0.25-0.30 s (1.5-1.9x), and a full SCF gets ~10-15 % faster (XC main is ~45 % of the SCF).  Not run.
+* The merged K = 4*blk GEMM may or may not beat 4 separate cuBLAS FP64 tensor-core GEMMs on an A100; A/B with
+  `numint.XC_MERGE_VMAT_GEMM` before relying on it.
+* XC gradient on A100 (2.4 s total for BPA): fewer launches per block (115 -> 36, measured above); the wall gain depends on
+  the idle share there, not measured.
+
+## 5. How to reproduce
+
+```
+python benchmarks/dft/bench_launch_overhead.py --basis def2-tzvp --repeat 2     # old/new rows (XC_FUSED False/True)
+python -m pytest gpu4pyscf/dft/tests/test_xc_fused.py
+```
+On a tree without the fused loops the script measures the original loops only (use it for the "old" column).
+Note that `XC_FUSED=False` in the new tree is not the pristine baseline: it still has the cuTENSOR host-path trimming and
+the cached grid-block views (Python calls 106.6k -> 97.6k for FP64 `nr_rks`).
