@@ -109,11 +109,42 @@ def _pad16(n):
     return (n + 15) // 16 * 16
 
 
+_ROWEXP_SRC = r'''
+extern "C" __global__ void rowexp(const double* __restrict__ a, int* __restrict__ e, int ncomp, int rows, int ng)
+{
+    int row = blockIdx.x;
+    double m = 0.;
+    for (int c = 0; c < ncomp; c++) {
+        const double* p = a + ((size_t)c * rows + row) * ng;
+        for (int g = threadIdx.x; g < ng; g += blockDim.x) m = fmax(m, fabs(p[g]));
+    }
+    for (int o = 16; o > 0; o >>= 1) m = fmax(m, __shfl_down_sync(0xffffffff, m, o));
+    __shared__ double sm[32];
+    if ((threadIdx.x & 31) == 0) sm[threadIdx.x >> 5] = m;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        m = threadIdx.x < (blockDim.x >> 5) ? sm[threadIdx.x] : 0.;
+        for (int o = 16; o > 0; o >>= 1) m = fmax(m, __shfl_down_sync(0xffffffff, m, o));
+        if (threadIdx.x == 0) {
+            int ex = 0;
+            if (m > 0.) frexp(m, &ex);
+            e[row] = ex;
+        }
+    }
+}
+'''
+_rowexp_kernel = None
+
+
 def _row_exponent(src):
     '''src [ncomp, rows, ng] -> int32 exponent e with max|src[:, r, :]| < 2^e.'''
-    amax = cupy.abs(src).max(axis=(0, 2))
-    _, e = cupy.frexp(amax)
-    return cupy.where(amax == 0, 0, e).astype(cupy.int32)
+    global _rowexp_kernel
+    if _rowexp_kernel is None:
+        _rowexp_kernel = cupy.RawKernel(_ROWEXP_SRC, 'rowexp')
+    ncomp, rows, ng = src.shape
+    e = cupy.empty(rows, dtype=cupy.int32)
+    _rowexp_kernel((rows,), (256,), (src, e, np.int32(ncomp), np.int32(rows), np.int32(ng)))
+    return e
 
 
 class Operand:
@@ -149,13 +180,27 @@ def int8_mm_nt(a, bt, out):
     return out
 
 
+def int8_mm_nt_batched(a, bt, out):
+    '''out[b] (m, n) int32 = a[b] (m, k) @ bt[b] (n, k)^T for contiguous int8 stacks (one strided-batched call:
+    fills the GPU when m, n are only a few hundred).'''
+    from cupy.cuda import cublas, device
+    nb, m, k = a.shape
+    n = bt.shape[1]
+    alpha = np.array(1, dtype=np.int32)
+    beta = np.array(0, dtype=np.int32)
+    h = device.get_cublas_handle()
+    cublas.gemmStridedBatchedEx(h, cublas.CUBLAS_OP_T, cublas.CUBLAS_OP_N, n, m, k,
+                                alpha.ctypes.data, bt.data.ptr, 3, k, n * k, a.data.ptr, 3, k, m * k,
+                                beta.ctypes.data, out.data.ptr, 10, n, m * n, nb, 72, -1)
+    return out
+
+
 def matmul_operands(oa, ob, out, accumulate=False):
     '''out (rows_a, rows_b) float64 (+)= A B^T from two Operand objects with equal nmod, q and kp.'''
     assert oa.nmod == ob.nmod and oa.q == ob.q and oa.kp == ob.kp
     n, q = oa.nmod, oa.q
     C = cupy.empty((n, oa.rp, ob.rp), dtype=cupy.int32)
-    for i in range(n):
-        int8_mm_nt(oa.planes[i], ob.planes[i], C[i])
+    int8_mm_nt_batched(oa.planes, ob.planes, C)
     ea = cupy.zeros(oa.rp, dtype=cupy.int32)
     ea[:oa.rows] = oa.e
     eb = cupy.zeros(ob.rp, dtype=cupy.int32)
