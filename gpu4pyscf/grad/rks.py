@@ -24,7 +24,7 @@ import cupy
 from pyscf import lib, gto
 from pyscf.grad import rks as rks_grad
 from gpu4pyscf.grad import rhf as rhf_grad
-from gpu4pyscf.dft import numint, xc_deriv
+from gpu4pyscf.dft import numint, xc_deriv, xc_fused
 from gpu4pyscf.dft import radi
 from gpu4pyscf.dft import gen_grid
 from gpu4pyscf.lib.cupy_helper import (
@@ -182,6 +182,126 @@ def _exc1_block(ao, wv, dm_mask, xctype, buf=None):
             exc1 += (ao[idx[d]] * w).sum(axis=2)
     return exc1.T
 
+def _blocked_weights(wv, ng_blk=MIN_BLK_SIZE):
+    '''Split wv [nvar, N] into per-grid-block C-contiguous [nvar, ng] arrays (two copies in total).'''
+    nvar, ngrids = wv.shape
+    nfull = ngrids // ng_blk
+    blocks = []
+    if nfull > 0:
+        full = cupy.ascontiguousarray(
+            wv[:, :nfull*ng_blk].reshape(nvar, nfull, ng_blk).transpose(1, 0, 2))
+        blocks.extend(full[b] for b in range(nfull))
+    if nfull * ng_blk < ngrids:
+        blocks.append(cupy.ascontiguousarray(wv[:, nfull*ng_blk:]))
+    return blocks
+
+def _exc1_blocks_fused(ni, opt, grids, xc_code, xctype, mo_coeff, mo_occ, dm, c_occ, grid_range, nao):
+    '''
+    d(Exc)/dR contribution of the AO derivatives, as [nao, 3], from two block passes:
+    (1) rho for all grids (fused kernels) -> one libxc call; (2) per block the derivative contractions,
+    with the elementwise multiply+sum chains replaced by one row-dot kernel.  Same quantity as _exc1_block.
+    '''
+    _sorted_mol = opt._sorted_mol
+    grid_start, grid_end = grid_range
+    ngrids_local = grid_end - grid_start
+    nvar = {'LDA': 1, 'GGA': 4, 'MGGA': 5}[xctype]
+
+    rho = cupy.empty((nvar, ngrids_local))
+    occ_mask = mo_occ > 0
+    cpos = cupy.asarray(mo_coeff[:, occ_mask] * mo_occ[occ_mask]**.5, order='C')
+    numint._eval_rho_blocks_mo(ni, _sorted_mol, grids, nao, xctype, [cpos], [rho], grid_range)
+    vxc = cupy.asarray(ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=0)[1], order='C')
+    rho = None
+    weights = cupy.asarray(grids.weights[grid_start:grid_end])
+    wv = vxc * weights
+    vxc = None
+    if xctype != 'LDA':
+        wv[0] *= .5
+    if xctype == 'MGGA':
+        wv[4] *= .5  # for the factor 1/2 in tau
+    wv_blocks = _blocked_weights(wv)
+    wv = None
+
+    nocc = cpos.shape[1]
+    blk = MIN_BLK_SIZE
+    lda = xctype == 'LDA'
+    B = cupy.zeros(4 * nao * blk)           # weighted AOs [4,nao,ng]
+    y = cupy.zeros(nao * blk)               # D (weighted AO)
+    z = cupy.zeros(nao * blk)               # D phi
+    dr = cupy.zeros(3 * nao * blk)          # d/dR of the weighted AO
+    W = cupy.zeros(3 * nao * blk)           # D (tau-weighted nabla AO)
+    t = cupy.zeros(3 * max(nocc, 1) * blk)  # C^T x
+    exc1_buf = cupy.zeros(nao * 3)
+    dm_mask_buf = cupy.zeros(nao * nao) if c_occ is None else None
+    c_buf = cupy.zeros(nao * nocc) if c_occ is not None else None
+    exc1_ao = cupy.zeros((nao, 3))
+    comp_x = (1, 2, 3)
+    comp_dr = (0, 1, 2)
+    comp_tau = (4, 5, 6, 5, 7, 8, 6, 8, 9)
+    ao_deriv = 1 if lda else 2
+
+    def apply_dm(mat, x, out, nbatch):
+        '''out = D x; D given as C C^T (mat = C [nao_sub,nocc]) or as a dense [nao_sub,nao_sub] matrix.'''
+        if c_occ is not None:
+            if nbatch == 1:
+                tmp = cupy.ndarray((mat.shape[1], x.shape[-1]), memptr=t.data)
+                contract('ki,kg->ig', mat, x, out=tmp)
+                contract('ik,kg->ig', mat, tmp, out=out)
+            else:
+                tmp = cupy.ndarray((nbatch, mat.shape[1], x.shape[-1]), memptr=t.data)
+                contract('ki,nkg->nig', mat, x, out=tmp)
+                contract('ik,nkg->nig', mat, tmp, out=out)
+        elif nbatch == 1:
+            contract('ij,jg->ig', mat, x, out=out)
+        else:
+            contract('ij,njg->nig', mat, x, out=out)
+        return out
+
+    ib = 0
+    for ao_mask, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, None,
+                                                 grid_range=grid_range):
+        ng = weight.shape[0]
+        nao_sub = idx.shape[0]
+        wvb = wv_blocks[ib]
+        ib += 1
+        if nao_sub == 0:
+            continue
+        if c_occ is not None:
+            if nao_sub == nao:
+                mat = c_occ
+            else:
+                mat = cupy.ndarray((nao_sub, nocc), memptr=c_buf.data)
+                cupy.take(c_occ, idx, axis=0, out=mat)
+        else:
+            mat = take_last2d(dm, idx, out=dm_mask_buf)
+        out = cupy.ndarray((nao_sub, 3), memptr=exc1_buf.data)
+        # aow (and, for MGGA, the tau-weighted nabla AOs) in one kernel
+        if lda:
+            Bv = cupy.ndarray((nao_sub, ng), memptr=B.data)
+            xc_fused.build_B(Bv, ao_mask[0], wvb, 0, ng, nao_sub, 'LDA')
+            yv = apply_dm(mat, Bv, cupy.ndarray((nao_sub, ng), memptr=y.data), 1)
+            xc_fused.row_dot3(out, ao_mask, yv, comp_x, ng, nao_sub)
+        else:
+            if xctype == 'MGGA':
+                Bv = cupy.ndarray((4, nao_sub, ng), memptr=B.data)
+            else:
+                Bv = cupy.ndarray((nao_sub, ng), memptr=B.data)
+            xc_fused.build_B(Bv, ao_mask, wvb, 0, ng, nao_sub, xctype)
+            B0 = Bv[0] if xctype == 'MGGA' else Bv
+            yv = apply_dm(mat, B0, cupy.ndarray((nao_sub, ng), memptr=y.data), 1)
+            xc_fused.row_dot3(out, ao_mask, yv, comp_x, ng, nao_sub)            # d phi_i * (D aow)_i
+            zv = apply_dm(mat, ao_mask[0], cupy.ndarray((nao_sub, ng), memptr=z.data), 1)
+            drv = _make_dR_dao_w(ao_mask, wvb[:4], out=dr)
+            xc_fused.row_dot3(out, drv, zv, comp_dr, ng, nao_sub, accumulate=True)   # d(aow-like) * (D phi)_i
+            if xctype == 'MGGA':
+                Wv = apply_dm(mat, Bv[1:4], cupy.ndarray((3, nao_sub, ng), memptr=W.data), 3)
+                xc_fused.row_dot3(out, ao_mask, Wv, comp_tau, ng, nao_sub, nd=3, accumulate=True)
+        if nao_sub == nao:
+            exc1_ao += out
+        else:
+            exc1_ao[idx] += out
+    return exc1_ao
+
 def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
                   verbose=None, with_lapl=False, device_id=0):
     ''' Calculate the gradient of vxc on given device
@@ -213,6 +333,11 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
             c_occ = cupy.asarray(mo_coeff[:, occ_mask] * mo_occ[occ_mask]**.5, order='C')
             if float(cupy.abs(c_occ.dot(c_occ.T) - dm).max()) > 1e-8:
                 c_occ = None
+        if numint.XC_FUSED and not LEGACY_EXC_GRAD and xctype in ('LDA', 'GGA', 'MGGA'):
+            exc1_ao = _exc1_blocks_fused(ni, opt, grids, xc_code, xctype, mo_coeff, mo_occ, dm, c_occ,
+                                         (grid_start, grid_end), nao)
+            log.timer_debug1('gradient of vxc', *t0)
+            return exc1_ao
         vtmp_buf = cupy.empty((3*nao*nao))
         mo_buf = cupy.empty_like(mo_coeff)
         dm_mask_buf = cupy.empty(nao*nao)
