@@ -113,7 +113,7 @@ already memory-bound; the only GEMM-like part is the DF contraction of item 4, w
   `solvent/smd.py` (borrowed methods, `_atomic_numbers`), `solvent/grad/smd.py` (`dm=`), `scf/mixed_precision.py` (`coarse_solvent_lebedev`, `_coarse_solvent`), tests `solvent/tests/test_pcm_cache.py` and `test_pcm_mixed_precision.py`,
   CPU scripts `solvent_algebra_cpu_check.py` (passes: C-PCM/COSMO q vs qt 1.5e-15 / 9e-16 relative, IEF 1.3e-2 and SS(V)PE 2.3e-1 so their second solve stays; DA-free product 9e-15) and `solvent_df_projection_cpu.py`.
 * `23965f5` `benchmarks/dft/bench_solvent.py`.
-* (this commit) `RESULTS_solvent.md`, `_coarse_solvent` guard for non-PCM/SMD solvents, test tolerance.
+* `8a14c74` `RESULTS_solvent.md`, `_coarse_solvent` guard for non-PCM/SMD solvents, test tolerance.
 
 Everything in this list is exact up to rounding except (a) the opt-in `coarse_solvent_lebedev` (final answer unchanged to the SCF tolerance, but the path differs) and (b) the SMD ECP fix, which intentionally changes SMD energies/gradients of ECP-atom molecules (bug fix).
 
