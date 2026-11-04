@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import threading
 import numpy as np
 import cupy
 from gpu4pyscf.lib import logger
@@ -66,6 +68,18 @@ def _contract_einsum(pattern, a, b, alpha, beta, out=None, einsum=cupy.einsum):
         out += tmp
     return out
 
+# cuTENSOR plan cache.  Building the descriptors, the contraction operator and the plan (heuristic search)
+# costs ~130 us of host time per call, which is comparable to the GPU time of a small grid-block GEMM and
+# makes the XC loops launch-bound on fast GPUs.  The shapes/strides repeat in every SCF cycle, so plans are
+# cached; a plan is only valid for the pointer alignment it was created with, which is part of the key.
+PLAN_CACHE = os.environ.get('GPU4PYSCF_CUTENSOR_PLAN_CACHE', '1') != '0'
+_plan_cache = {}
+_PLAN_CACHE_MAX = 8192
+
+def _alignment(arr):
+    ptr = arr.data.ptr
+    return min(256, ptr & -ptr) if ptr else 256
+
 def contraction(
     pattern, a, b, alpha, beta,
     out=None,
@@ -104,20 +118,36 @@ def contraction(
     if a.size == 0 or b.size == 0 or c.size == 0:
         raise ValueError(f"cutensor contraction doesn't support zero-sized array (a.shape = {a.shape}, b.shape = {b.shape}, expected c.shape = {c.shape})")
 
-    desc_a = _create_tensor_descriptor(a)
-    desc_b = _create_tensor_descriptor(b)
-    desc_c = _create_tensor_descriptor(c)
+    cache_key = None
+    if PLAN_CACHE:
+        cache_key = (pattern, a.shape, a.strides, b.shape, b.strides, c.shape, c.strides,
+                     dtype.str, _alignment(a), _alignment(b), _alignment(c),
+                     op_a, op_b, op_c, algo, jit_mode, compute_desc, ws_pref,
+                     cupy.cuda.Device().id, threading.get_ident())
+        hit = _plan_cache.get(cache_key)
+    else:
+        hit = None
+    if hit is not None:
+        plan, ws_size = hit
+    else:
+        desc_a = _create_tensor_descriptor(a)
+        desc_b = _create_tensor_descriptor(b)
+        desc_c = _create_tensor_descriptor(c)
 
-    mode_a = _auto_create_mode(a, mode_a)
-    mode_b = _auto_create_mode(b, mode_b)
-    mode_c = _auto_create_mode(c, mode_c)
-    operator = cutensor.create_contraction(
-        desc_a, mode_a, op_a, desc_b, mode_b, op_b, desc_c, mode_c, op_c,
-        compute_desc)
-    plan_pref = cutensor.create_plan_preference(algo=algo, jit_mode=jit_mode)
-    ws_size = cutensor_backend.estimateWorkspaceSize(
-        cutensor._get_handle().ptr, operator.ptr, plan_pref.ptr, ws_pref)
-    plan = cutensor.create_plan(operator, plan_pref, ws_limit=ws_size)
+        mode_a = _auto_create_mode(a, mode_a)
+        mode_b = _auto_create_mode(b, mode_b)
+        mode_c = _auto_create_mode(c, mode_c)
+        operator = cutensor.create_contraction(
+            desc_a, mode_a, op_a, desc_b, mode_b, op_b, desc_c, mode_c, op_c,
+            compute_desc)
+        plan_pref = cutensor.create_plan_preference(algo=algo, jit_mode=jit_mode)
+        ws_size = cutensor_backend.estimateWorkspaceSize(
+            cutensor._get_handle().ptr, operator.ptr, plan_pref.ptr, ws_pref)
+        plan = cutensor.create_plan(operator, plan_pref, ws_limit=ws_size)
+        if cache_key is not None:
+            if len(_plan_cache) >= _PLAN_CACHE_MAX:
+                _plan_cache.clear()
+            _plan_cache[cache_key] = (plan, ws_size)
     ws = cupy.empty(ws_size, dtype=np.int8)
     out = c
 

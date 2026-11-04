@@ -176,3 +176,12 @@ Applies to every GPU (an FP64 tensor-core GPU also runs fewer FP64 FLOPs).
 * One XC evaluation on A100 (FP64, 0.49 s wall) has only 0.245 s of GPU kernel time: GEMM 0.158 s, AO evaluation 0.061 s,
   elementwise 0.019 s. **Half the wall time is idle gaps** (python/cupy launch overhead in the 2 x 260-block loops).
   On this hardware the XC cost is orchestration, not arithmetic.
+
+### cuTENSOR plan cache (exact, all GPUs; `lib/cutensor.py`, env `GPU4PYSCF_CUTENSOR_PLAN_CACHE=0` disables)
+Every `contraction()` call rebuilt three tensor descriptors, the operator, a plan preference and a plan (~130 us of host
+time) although the shapes repeat in every grid block of every SCF cycle. Plans are now cached per
+(pattern, shapes, strides, dtype, pointer alignment, thread, device); results are bit-identical (test included).
+A100, Bisphenol A, plain FP64 path, no approximation: one `nr_rks` 0.484 -> 0.430 s; **full SCF 12.35 -> 10.95 s (-11 %)**,
+same energy, same gradient error. 102 existing + new tests pass on A100.
+The remaining A100 XC host time is ~100k Python calls per evaluation (per-block launch of ~14 small kernels in the MGGA
+rho path, ~7 in the Vxc path): next step is one batched GEMM + one fused rho kernel per block.

@@ -49,3 +49,24 @@ Compute is spent sparingly: micro-benchmarks first (minutes on one GPU), SCF run
 | E4 | cuBLAS emulation: slower than native on A100, silent no-op on T4. Own Ozaki-I INT8: 4-7x over native FP64 on T4 at 42-56 bits for big-K GEMMs. Needs fused slicing kernel + integration. **Highest-value next step.** |
 | gradient | final_grad_factor 0.1 gives gradients ~5x closer to a tight reference than plain FP64 at default tolerance. |
 | denied | Cloning/building third-party GEMMul8 on the runtime was refused by the permission classifier; own implementation used instead. |
+
+
+## Status after round 2 (T4 + A100 numbers in RESULTS_mixed_precision.md)
+
+| id | result |
+|---|---|
+| profile | FP64 XC on T4 is 95 % GEMM (no Amdahl problem for INT8 XC). On A100 half of the XC wall time is host/launch idle. |
+| noise floors | XC-FP32 alone: self-consistent \|g\| 7e-6..1e-5 but FP64 \|g\| at that solution ~4e-5 (Vxc-matrix FP32 accumulation, linear in chunk length). K-FP32 alone: ~1e-4. |
+| stage 1b (new) | K FP64 + XC FP32 + VV10 FP32 polish down to plateau, then 1-2 FP64 cycles. T4 BPA SCF 123 -> 87 s. |
+| NLC-grid FP32 XC | NLC total 22 -> 12.8 s on T4 (error 1e-9 Eh). |
+| gradient | contract-first + occupied factor: 39.8 -> 17.2 s on T4, exact (1e-14). No gain on A100 (not GEMM-bound there). |
+| plan cache | exact, A100 SCF -11 %. |
+| A100 mixed precision | no benefit (FP64 TC = FP32 SIMT); only FP32 VV10 helps (~0.7 s of 12). Leave off on sm_80+. |
+| E5-E9, INT8 slicer | not started; see "next" below |
+
+Next, in order of expected value per effort:
+1. Launch-count reduction in the XC loops (batched GEMM for c = C^T [ao0..3], fused MGGA rho kernel, fewer small kernels in the Vxc path) - helps A100/H100 most, exact.
+2. INT8 Ozaki FP64 emulation, K first (static DF tensor sliced once), integer-only fused slicer, diagonal-fused GEMMs; XC second. T4-class GPUs.
+3. VV10 symmetric-pair kernel (exact, ~1.5x fewer ops) and stream overlap of VV10 with XC/K.
+4. Reduced-precision DF tensor storage (memory 2x) and half-triangle K contraction.
+5. TF32 3-split with outside-TC accumulation as a fused CUTLASS-style kernel (A100/H100 early cycles).
