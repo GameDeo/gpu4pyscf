@@ -16,6 +16,8 @@ def main():
     p.add_argument('--n1', type=int, default=8, help='moduli (XC and K) in the coarse stage')
     p.add_argument('--n2', type=int, default=11)
     p.add_argument('--g1', type=float, default=1e-3, help='coarse-stage |g| threshold')
+    p.add_argument('--n2a', type=int, default=0, help='moduli of the first full-grid cycles (until |g| < g2); 0 = n2')
+    p.add_argument('--g2', type=float, default=1e-4)
     p.add_argument('--tol', type=float, default=1e-9)
     p.add_argument('--vv10', default='fp32')
     p.add_argument('--ref', type=float, default=-731.6494045102813)
@@ -62,7 +64,12 @@ def main():
         mf.conv_tol_grad = None
         mf.conv_tol = args.tol
         t0 = time.perf_counter()
-    numint.XC_CRT_MODULI = df_jk.K_CRT_MODULI = args.n2
+    numint.XC_CRT_MODULI = df_jk.K_CRT_MODULI = args.n2a or args.n2
+    if args.n2a:
+        def cb(env):
+            n = args.n2 if float(env['norm_gorb']) < args.g2 else args.n2a
+            numint.XC_CRT_MODULI = df_jk.K_CRT_MODULI = n
+        mf.callback = cb
     mf.kernel(dm0=dm)
     cupy.cuda.Stream.null.synchronize()
     t2 = time.perf_counter()
