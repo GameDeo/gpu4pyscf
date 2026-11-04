@@ -51,6 +51,10 @@ DEFAULTS = {
     'conv_tol_grad': 3e-4,        # stage-1 orbital gradient threshold: the only real criterion
     'conv_tol': 1e-3,             # stage-1 energy threshold (FP32 noise in E is ~1e-5..1e-4)
     'max_cycle': 30,
+    # Stage-2 (FP64) gradient threshold = final_grad_factor * (usual threshold).  A staged run
+    # reaches the usual threshold with a larger residual than a pure FP64 DIIS path, which showed
+    # up as 3.4x larger gradient errors; tightening by this factor restores FP64-level quality.
+    'final_grad_factor': 0.3,
 }
 
 
@@ -107,3 +111,12 @@ def run_fast_stage(mf, dm0, **kwargs):
              e_tot, conv, mf.cycles_stage1)
     dm = mf.make_rdm1(mo_coeff, mo_occ)
     return tag_array(dm, mo_coeff=mo_coeff, mo_occ=mo_occ)
+
+
+def final_conv_tol_grad(mf):
+    '''Gradient threshold for the FP64 stage of a staged run.'''
+    opt = get_options(mf)
+    tol = mf.conv_tol_grad
+    if tol is None:
+        tol = mf.conv_tol**.5
+    return tol * opt['final_grad_factor']

@@ -155,6 +155,18 @@ def main():
            'nao': int(mol.nao), 'stages': {k: {'sec': v[0], 'calls': v[1]} for k, v in STAGES.items()}}
     res['cycles'] = int(getattr(mf, 'cycles', -1))
     res['cycles_stage1'] = int(getattr(mf, 'cycles_stage1', 0))
+    try:
+        dfobj = mf.with_df
+        nbytes = 0
+        for obj in [dfobj] + list(getattr(dfobj, '_rsh_df', {}).values()):
+            c = getattr(obj, '_cderi', None)
+            if c is not None:
+                nbytes += sum(int(x.nbytes) for x in (c.values() if isinstance(c, dict) else c))
+        res['cderi_GB'] = nbytes / 1e9
+        print(f'# DF tensors held: {nbytes / 1e9:.2f} GB; GPU mem pool used: '
+              f'{cupy.get_default_memory_pool().total_bytes() / 1e9:.2f} GB')
+    except Exception as ex:  # reporting only
+        print('# (could not size DF tensors:', ex, ')')
     if args.grad:
         _sync()
         t0 = time.perf_counter()

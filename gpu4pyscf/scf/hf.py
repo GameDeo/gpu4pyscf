@@ -386,22 +386,24 @@ def scf(mf, dm0=None, **kwargs):
         # Initial guess from existing wavefunction
         dm0 = mf.make_rdm1()
 
+    conv_tol_grad = mf.conv_tol_grad
     if getattr(mf, 'mixed_precision', False) and mf.max_cycle > 0:
         # Reduced-precision stage 1; the regular FP64 SCF below polishes its density.
         from gpu4pyscf.scf import mixed_precision
         dm0 = mixed_precision.run_fast_stage(mf, dm0, **kwargs)
+        conv_tol_grad = mixed_precision.final_conv_tol_grad(mf)
 
     if mf.max_cycle > 0 or mf.mo_coeff is None:
         mf.converged, mf.e_tot, \
                 mf.mo_energy, mf.mo_coeff, mf.mo_occ = \
-                _kernel(mf, mf.conv_tol, mf.conv_tol_grad,
+                _kernel(mf, mf.conv_tol, conv_tol_grad,
                         dm0=dm0, callback=mf.callback,
                         conv_check=mf.conv_check, **kwargs)
     else:
         # Avoid to update SCF orbitals in the non-SCF initialization
         # (issue #495).  But run regular SCF for initial guess if SCF was
         # not initialized.
-        mf.e_tot = _kernel(mf, mf.conv_tol, mf.conv_tol_grad,
+        mf.e_tot = _kernel(mf, mf.conv_tol, conv_tol_grad,
                             dm0=dm0, callback=mf.callback,
                             conv_check=mf.conv_check, **kwargs)[1]
 
