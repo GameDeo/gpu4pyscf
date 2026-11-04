@@ -15,7 +15,9 @@ def main():
     p.add_argument('--coarse', type=int, nargs=2, default=(50, 194))
     p.add_argument('--n1', type=int, default=8, help='moduli (XC and K) in the coarse stage')
     p.add_argument('--n2', type=int, default=11)
+    p.add_argument('--g0', type=float, default=3e-2)
     p.add_argument('--g1', type=float, default=1e-3, help='coarse-stage |g| threshold')
+    p.add_argument('--basis0', default='', help='small basis for a cheap first SCF whose density seeds the coarse stage')
     p.add_argument('--n2a', type=int, default=0, help='moduli of the first full-grid cycles (until |g| < g2); 0 = n2')
     p.add_argument('--g2', type=float, default=1e-4)
     p.add_argument('--tol', type=float, default=1e-9)
@@ -41,12 +43,29 @@ def main():
     wm.kernel()
     cupy.cuda.Stream.null.synchronize()
 
+    dm_seed = None
+    if args.basis0:
+        t00 = time.perf_counter()
+        from pyscf import scf as pyscf_scf
+        mol0 = gto.M(atom=mol.atom, basis=args.basis0, verbose=0, max_memory=14000)
+        mf0 = dft.RKS(mol0, xc='wb97m-v').density_fit()
+        mf0.grids.atom_grid = tuple(args.coarse)
+        mf0.nlcgrids.atom_grid = (50, 194)
+        numint.XC_CRT_MODULI = df_jk.K_CRT_MODULI = args.n1
+        mf0.conv_tol = 1e-2
+        mf0.conv_tol_grad = args.g0
+        mf0.kernel()
+        cupy.cuda.Stream.null.synchronize()
+        dm_seed = pyscf_scf.addons.project_dm_nr2nr(mol0, mf0.make_rdm1().get(), mol)
+        dm_seed = cupy.asarray(dm_seed)
+        print(f'# stage 0 ({args.basis0}): E={mf0.e_tot:.8f} cycles={mf0.cycles} time={time.perf_counter() - t00:.1f} s')
+        del mf0
     mf = make()
     mf.conv_tol = args.tol
     mf.max_cycle = 50
     full = mf.grids
     t0 = time.perf_counter()
-    dm = None
+    dm = dm_seed
     if args.g1 > 0:
         g = copy.copy(full)
         g.reset()
@@ -55,7 +74,7 @@ def main():
         numint.XC_CRT_MODULI = df_jk.K_CRT_MODULI = args.n1
         mf.conv_tol_grad = args.g1
         mf.conv_tol = 1e-2
-        mf.kernel()
+        mf.kernel(dm0=dm)
         cupy.cuda.Stream.null.synchronize()
         t1 = time.perf_counter()
         print(f'# stage A (coarse {args.coarse}, n={args.n1}): E={mf.e_tot:.10f} cycles={mf.cycles} time={t1 - t0:.1f} s')

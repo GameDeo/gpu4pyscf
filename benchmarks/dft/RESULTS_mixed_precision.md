@@ -218,3 +218,11 @@ INT8 GEMM ~37 TOPS achieved (130 peak, power-capped T4).  Per XC block (nao_sub 
   gives nothing (fixed per-cycle costs); stopping the full-grid stage at 8 moduli never reaches the threshold (14 cycles).
 * Integrated as `mf.mixed_precision = {'scheme': 'crt'}` ('auto' picks it on sm_75/86/87/89), final_grad_factor 0.1:
   SCF 48.7 s, dE 1.4e-10 Eh, max gradient error 1.2e-7 (factor 1.0: 45.7 s but 8.2e-7).  Gradient (still FP64): 22.8 s.
+
+### Negative: small-basis seed density (T4, BPA)
+def2-SVP (or SV(P)) SCF on the coarse grid (5-7 cycles, 8.7-11.7 s) projected onto def2-TZVP saves 2 cycles of the coarse stage and 1 of the
+full-grid stage, but the whole pipeline takes 50.7 s vs 46.4 s without the seed: not worth it (`ladder_test.py --basis0`).
+### Note: XC-gradient GEMMs on CRT (T4)
+`grad.rks.XC_GRAD_CRT_MODULI` (agrees with FP64 to 6e-13) replaces the 2 GEMMs of D x = C (C^T x): the first (K = nao_sub) is fine, but the
+second has K = nocc = 61, where the Garner reconstruction (~n^2 ops per output element) costs more than the 128 FLOP of the GEMM itself, so
+CRT only pays for long reductions: the XC-gradient time went 6.3 -> 5.9 s.  Keep FP64 (or use the launch-overhead branch) for short-K products.
