@@ -36,10 +36,13 @@ from gpu4pyscf.lib import logger
 from gpu4pyscf.lib.cupy_helper import tag_array
 
 def _default_gemm_precision():
-    '''3xTF32 tensor-core emulation of FP32 needs Ampere (sm_80) or newer; otherwise plain FP32.'''
+    '''GPUs with FP64 tensor cores (sm_80+: A100/H100) run FP64 GEMMs as fast as FP32 SIMT, and the only
+    reduced-precision GEMM path that exists here (cuTENSOR's "3xTF32") is plain FP32 SIMT, which is slower
+    than FP64 there (measured).  Keep K / XC GEMMs in FP64 on those GPUs and use FP32 only where FP64 is
+    slow (Turing, consumer and L-series parts).  VV10 stays FP32 everywhere: it is SIMT-bound.'''
     try:
         major = cupy.cuda.Device().compute_capability
-        return 'tf32x3' if int(major) >= 80 else 'fp32'
+        return 'fp64' if int(major) >= 80 else 'fp32'
     except Exception:
         return 'fp32'
 
