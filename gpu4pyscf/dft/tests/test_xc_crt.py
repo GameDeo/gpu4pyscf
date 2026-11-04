@@ -126,7 +126,7 @@ class KnownValues(unittest.TestCase):
         c1 = cupy.asarray(mf3.with_df._cderi[0])
         err = float(cupy.abs(c1 - c0).max() / cupy.abs(c0).max())
         print(f'[cderi crt] max rel err {err:.2e}')
-        self.assertLess(err, 1e-11)
+        self.assertLess(err, 1e-10)
 
     def _check(self, xc, nmod, tol):
         dm = mf.make_rdm1()

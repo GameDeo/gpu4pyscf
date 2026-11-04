@@ -18,7 +18,7 @@ import numpy as np
 import cupy
 
 ALL_MODULI = [256, 255, 253, 251, 247, 241, 239, 233, 229, 227, 223, 211, 199, 197, 193, 191, 181, 179, 173, 167]
-QMAX = 44            # int64 quantization above 30 bits (slower mod)
+QMAX = 48            # int64 quantization above 30 bits (split-limb residues are valid up to 49 bits)
 MAX_K = 120000       # int32 accumulation limit of one residue GEMM: K * 128^2 < 2^31
 
 _kern = {}
