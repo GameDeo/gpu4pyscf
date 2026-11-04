@@ -226,3 +226,43 @@ full-grid stage, but the whole pipeline takes 50.7 s vs 46.4 s without the seed:
 `grad.rks.XC_GRAD_CRT_MODULI` (agrees with FP64 to 6e-13) replaces the 2 GEMMs of D x = C (C^T x): the first (K = nao_sub) is fine, but the
 second has K = nocc = 61, where the Garner reconstruction (~n^2 ops per output element) costs more than the 128 FLOP of the GEMM itself, so
 CRT only pays for long reductions: the XC-gradient time went 6.3 -> 5.9 s.  Keep FP64 (or use the launch-overhead branch) for short-K products.
+
+
+## Round 3b: compatibility, basis-set scaling, A100  (agents' branches merged: symmetric VV10 kernel, fused XC loops)
+
+### Compatibility matrix (`compat_test.py --grad`, T4, grids (50,194)/NLC (30,110), conv_tol 1e-9; 'crt' scheme vs plain FP64, same DF basis)
+| case | dE (crt - fp64) | max grad diff |
+|---|---|---|
+| wB97M-V / def2-SVP water | -1.7e-12 | 6.6e-7 |
+| PBE, LDA, B3LYP, TPSSh, r2SCAN, wB97X-V, B97M-V (def2-TZVP, acetic acid) | 1e-11 .. 1e-10 | 0.8e-6 .. 3.3e-6 |
+| wB97M-V Cartesian AOs | +3.2e-10 | 1.1e-6 |
+| UKS wB97M-V CH3 radical, UKS PBE0 NO2 | -4e-11, -5e-11 | 2.4e-7, 6.5e-7 |
+| ECP: CH3I (def2-TZVP, I ECP), PtCl4(2-) PBE0 | -5.3e-9, +6.5e-10 | 9.5e-6, 7.9e-6 |
+| ECP: AgCl | neither FP64 nor crt converges (SCF problem, not precision) | - |
+| acetate anion def2-TZVPPD | -1.3e-10 | 3.2e-6 |
+| water def2-QZVPP / QZVPPD, acetic acid def2-QZVPPD (390 AOs) | 1e-11 .. 6e-12 | 1.4e-7 .. 8.4e-7 |
+UKS falls back to FP64 XC (only K uses INT8).  Gradient differences are dominated by the FP64 reference itself (it converges to
+|g| ~ 3e-5 only; the crt scheme tightens the last stage by 0.1).  The iodine ECP case has the largest dE (5e-9 Eh): heavy atoms
+have a larger AO dynamic range inside one scaled row -> use more moduli (crt_moduli_final) for Z > 36 if 1e-9 matters.
+
+### Basis-set scaling (`scale_basis.py`, Vitamin C, 20 atoms, wB97M-V + DF, grids (75,302)/(50,194); T4)
+| basis | nao | crt scheme | plain FP64 | speedup | dE (crt - fp64) |
+|---|---|---|---|---|---|
+| def2-SVP | 208 | 27.9 s | 38.7 s | 1.4x | -3.3e-10 |
+| def2-TZVP | 420 | 28.7 s | 60.7 s | 2.1x | -2.4e-10 |
+| def2-TZVPD | 534 | 39.2 s | 82.8 s | 2.1x | -1.7e-10 |
+| def2-QZVPP | 924 | 58.7 s | 142.3 s | 2.4x | -4.2e-10 |
+DF tensor (2.9 GB at QZVPP) stays on the GPU; the speedup grows with basis size because GEMM time grows fastest.
+
+### Gradient pieces after the NLC contract-first change (T4, BPA)
+NLC gradient 3.3 -> 1.07 s, XC gradient 5.1 s, whole gradient 16.8 -> 14.3 s steady (19.2 s first call incl. JIT).  Coarse NLC grid (30,110)
+in the coarse stage: VV10 kernel time 9.8 -> 2.7 s.  BPA T4 crt scheme: SCF 45.7 s, dE 1.5e-10, max gradient error 9.8e-8.
+
+### A100 (sm_80 libs built on the T4 host; BPA wB97M-V/def2-TZVP, VV10 FP32, vs tight reference)
+| | SCF | gradient | dE | max grad err |
+|---|---|---|---|---|
+| plain FP64 (merged code: sym VV10, fused loops) | 5.54 s | 1.99 s | -5.3e-10 | 3.4e-7 |
+| scheme 'classic' (coarse stage + FP64) | 5.44 s | 1.54 s | -6.0e-10 | 2.2e-7 |
+| scheme 'crt' | 17.5 s | 1.60 s | -4.5e-10 | 1.9e-7 |
+Before this round the A100 needed 10.95 s (SCF) + 2.5 s (gradient): the merged VV10 + fused XC loops give ~2x; INT8 CRT is 3x *slower*
+than FP64 on the A100 (XC 0.705 vs 0.218 s/call: FP64 tensor cores + memory-bound quantize passes), so 'auto' selects 'classic' there.
