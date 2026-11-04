@@ -372,3 +372,53 @@ def gemm_dense(a, b, nmod, out=None, qmax=QMAX, budget=1.0e9):
         oa = Operand(a[r0:r1][None], nmod, q)
         matmul_operands(oa, ob, out[r0:r1])
     return out
+
+
+_RHO_SRC = r'''
+extern "C" __global__ void rho_cT(double* __restrict__ rho, const double* __restrict__ c, long long ngp, long long nocc,
+                                  long long ng, long long mode)
+{
+    // c: [ncomp][ngp][nocc] (rows = grid points); one warp per grid point; rho: [nvar][ng]
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    long long g = (long long)blockIdx.x * 4 + warp;
+    if (g >= ng) return;
+    double v0 = 0, v1 = 0, v2 = 0, v3 = 0, v4 = 0;
+    const double* p0 = c + g * nocc;
+    long long cs = ngp * nocc;
+    for (long long i = lane; i < nocc; i += 32) {
+        double c0 = p0[i];
+        v0 += c0 * c0;
+        if (mode >= 1) {
+            double c1 = p0[i + cs], c2 = p0[i + 2 * cs], c3 = p0[i + 3 * cs];
+            v1 += c0 * c1; v2 += c0 * c2; v3 += c0 * c3;
+            v4 += c1 * c1 + c2 * c2 + c3 * c3;
+        }
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        v0 += __shfl_down_sync(0xffffffff, v0, o);
+        v1 += __shfl_down_sync(0xffffffff, v1, o);
+        v2 += __shfl_down_sync(0xffffffff, v2, o);
+        v3 += __shfl_down_sync(0xffffffff, v3, o);
+        v4 += __shfl_down_sync(0xffffffff, v4, o);
+    }
+    if (lane == 0) {
+        rho[g] = v0;
+        if (mode >= 1) { rho[ng + g] = 2 * v1; rho[2 * ng + g] = 2 * v2; rho[3 * ng + g] = 2 * v3; }
+        if (mode >= 2) rho[4 * ng + g] = 0.5 * v4;
+    }
+}
+'''
+_rho_kernel = None
+
+
+def rho_from_cT(c, ng, xctype):
+    '''rho [nvar, ng] from c [ncomp, ngp, nocc] (INT8-GEMM output layout, grid points as rows).'''
+    global _rho_kernel
+    if _rho_kernel is None:
+        _rho_kernel = cupy.RawKernel(_RHO_SRC, 'rho_cT')
+    mode = {'LDA': 0, 'GGA': 1, 'NLC': 1, 'MGGA': 2}[xctype]
+    nvar = {0: 1, 1: 4, 2: 5}[mode]
+    rho = cupy.empty((nvar, ng))
+    _, ngp, nocc = c.shape
+    _rho_kernel(((ng + 3) // 4,), (128,), (rho, c, np.int64(ngp), np.int64(nocc), np.int64(ng), np.int64(mode)))
+    return rho

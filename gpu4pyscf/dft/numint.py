@@ -500,35 +500,23 @@ def _eval_rho2_fp32(ao, cpos, xctype):
     return rho
 
 def _eval_rho2_crt(ao, cpos, xctype):
-    '''FP64-class version of _eval_rho2 from INT8 residue GEMMs (ao: [comp,nao,ng] or [nao,ng]; cpos [nao,nocc]).'''
+    '''FP64-class version of _eval_rho2 from INT8 residue GEMMs (ao: [comp,nao,ng] or [nao,ng]; cpos [nao,nocc]).
+    The half-transformed orbitals come out with grid points as rows ([comp, ng, nocc]); one warp-per-point kernel
+    assembles rho, |nabla rho| and tau.'''
     from gpu4pyscf.lib import crt_gemm
     ctT = cupy.ascontiguousarray(cpos.T)
     ngrids = ao.shape[-1]
-
-    def c_of(a):
+    nocc = cpos.shape[1]
+    ncomp = 1 if xctype == 'LDA' else 4
+    P1 = (ngrids + 15) // 16 * 16
+    c4 = cupy.empty((ncomp, P1, nocc))
+    for k in range(ncomp):
+        a = ao if ao.ndim == 2 else ao[k]
         a = cupy.ascontiguousarray(a)
         nk = a.shape[0]
         view = cupy.lib.stride_tricks.as_strided(a, shape=(1, ngrids, nk), strides=(0, a.itemsize, ngrids * a.itemsize))
-        c, _ = crt_gemm.gemm_planes(view, ctT, XC_CRT_MODULI)
-        return c[:ngrids]                       # [ng, nocc]
-
-    if xctype == 'LDA':
-        c0 = c_of(ao if ao.ndim == 2 else ao[0])
-        return (c0 * c0).sum(axis=1)[None]
-    nvar = 4 if xctype in ('GGA', 'NLC') else 5
-    rho = cupy.empty((nvar, ngrids))
-    c0 = c_of(ao[0])
-    rho[0] = (c0 * c0).sum(axis=1)
-    if nvar == 5:
-        rho[4] = 0
-    for i in range(1, 4):
-        c1 = c_of(ao[i])
-        rho[i] = 2 * (c0 * c1).sum(axis=1)
-        if nvar == 5:
-            rho[4] += (c1 * c1).sum(axis=1)
-    if nvar == 5:
-        rho[4] *= .5
-    return rho
+        crt_gemm.gemm_planes(view, ctT, XC_CRT_MODULI, out=c4[k])
+    return crt_gemm.rho_from_cT(c4, ngrids, xctype)
 
 def _vmat_block_fp32(ao, wv, xctype, out):
     '''FP32 version of the per-block XC matrix build; ao [comp,nao,ng], wv [nvar,ng] (float32).
@@ -555,24 +543,24 @@ def _vmat_block_fp32(ao, wv, xctype, out):
         raise NotImplementedError(f'FP32 XC for {xctype}')
     return out
 
-def _vmat_block_crt(ao, wv, xctype, out):
+def _vmat_block_crt(ao, wv, p0, xctype, out):
     '''FP64-class per-block XC matrix from INT8 residue GEMMs (XC_PRECISION == 'crt'); same contractions as the FP64
-    path, with the reduction over (component, grid) done as one GEMM of length ncomp*ng.'''
+    path, with the reduction over (component, grid) done as one GEMM of length ncomp*ng.  wv: [nvar, ngrids] in the
+    fused-loop convention (row 0 carries the 1/2, row 4 the 1/4 of the tau term); the block is wv[:, p0:p0+ng].'''
     from gpu4pyscf.lib import crt_gemm
     if xctype == 'LDA':
         ao0 = ao if ao.ndim == 2 else ao[0]
-        aow = ao0 * wv[0]
+        ng = ao0.shape[1]
+        aow = ao0 * wv[0, p0:p0+ng]
         return crt_gemm.gemm_nt(ao0, aow, XC_CRT_MODULI, out=out)
+    nao_sub, ng = ao.shape[1:]
     if xctype == 'GGA':
-        aow = _scale_ao(ao, wv[:4])
-        return crt_gemm.gemm_nt(ao[0], aow, XC_CRT_MODULI, out=out)
+        b = cupy.empty((nao_sub, ng))
+        xc_fused.build_B(b, ao, wv, p0, ng, nao_sub, 'GGA')
+        return crt_gemm.gemm_nt(ao[0], b, XC_CRT_MODULI, out=out)
     if xctype == 'MGGA':
-        nao_sub, ng = ao.shape[1:]
         b = cupy.empty((4, nao_sub, ng))
-        _scale_ao(ao, wv[:4], out=b[0])
-        w_tau = .5 * wv[4]
-        for i in range(1, 4):
-            cupy.multiply(ao[i], w_tau, out=b[i])
+        xc_fused.build_B(b, ao, wv, p0, ng, nao_sub, 'MGGA')
         return crt_gemm.gemm_nt(cupy.ascontiguousarray(ao[:4]), b, XC_CRT_MODULI, out=out)
     raise NotImplementedError(f'CRT XC for {xctype}')
 
@@ -798,7 +786,7 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
             if xctype == 'GGA':
                 wv[0] *= .5
             if xctype == 'MGGA':
-                if fused:
+                if fused or crt_vmat:
                     # 1/2 of the GGA part; 1/2 (tau definition) * 1/2 (symmetrisation) of the tau part
                     wv[0] *= .5
                     wv[4] *= .25
@@ -827,7 +815,7 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
             nao_sub = len(idx)
             if crt_vmat:
                 vtmp = cupy.ndarray((nao_sub, nao_sub), memptr=vtmp_buf.data)
-                _vmat_block_crt(ao_mask, wv[:, p0:p1], xctype, vtmp)
+                _vmat_block_crt(ao_mask, wv, p0, xctype, vtmp)
                 add_sparse(vmat, vtmp, idx)
                 p0 = p1
                 continue
@@ -2098,7 +2086,7 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
         if crt_xc:
             nsub = len(mask)
             vtmp = cupy.empty((nsub, nsub))
-            _vmat_block_crt(ao, wv, 'GGA', vtmp)
+            _vmat_block_crt(ao, wv, 0, 'GGA', vtmp)
             add_sparse(vmat, vtmp, mask)
             continue
         aow = _scale_ao(ao, wv)
