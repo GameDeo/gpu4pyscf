@@ -18,19 +18,19 @@ import numpy as np
 import cupy
 
 ALL_MODULI = [256, 255, 253, 251, 247, 241, 239, 233, 229, 227, 223, 211, 199, 197, 193, 191, 181, 179, 173, 167]
-QMAX = 48            # int64 quantization above 30 bits (split-limb residues are valid up to 49 bits)
+QMAX = 52            # operand bits; above 30 bits the quantization uses int64 values and three-limb residues
 MAX_K = 120000       # int32 accumulation limit of one residue GEMM: K * 128^2 < 2^31
 
 _kern = {}
 
 
 def _resid_code(i, p, wide, dst):
-    '''C statements: r = x mod p (balanced) -> dst.  Wide (int64) values are split into two int32 limbs (x = xh 2^18 + xl),
-    because 64-bit `%` is slow on the GPU.  Valid for |x| < 2^49.'''
+    '''C statements: r = x mod p (balanced) -> dst.  Wide (int64) values are split into three int32 limbs
+    (x = xh 2^36 + xm 2^18 + xl), because 64-bit `%` is slow on the GPU.  Valid for |x| < 2^54.'''
     h = (p + 1) // 2
     if wide:
-        c = (1 << 18) % p
-        core = f'int r = ((xh % {p}) * {c} + xl) % {p};'
+        c18, c36 = (1 << 18) % p, (1 << 36) % p
+        core = f'int r = ((xh % {p}) * {c36} + xm * {c18} + xl) % {p};'
     else:
         core = f'int r = x % {p};'
     return f'{{ {core} if (r < 0) r += {p}; if (r >= {h}) r -= {p}; {dst} = (signed char)r; }}'
@@ -45,7 +45,7 @@ def plan(K, nmod, qmax=QMAX):
 
 def _quant_src(n, wide):
     T = 'long long' if wide else 'int'
-    pre = 'int xh = (int)(x >> 18), xl = (int)(x & 0x3FFFF);' if wide else ''
+    pre = 'int xh = (int)(x >> 36), xm = (int)((x >> 18) & 0x3FFFF), xl = (int)(x & 0x3FFFF);' if wide else ''
     body = [_resid_code(i, p, wide, f'out[(size_t){i} * plane + idx]') for i, p in enumerate(ALL_MODULI[:n])]
     return r'''
 extern "C" __global__ void quant(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
@@ -104,7 +104,7 @@ extern "C" __global__ void recon(const int* __restrict__ C, const int* __restric
 
 def _quant3t_src(n, wide):
     T = 'long long' if wide else 'int'
-    pre = 'int xh = (int)(x >> 18), xl = (int)(x & 0x3FFFF);' if wide else ''
+    pre = 'int xh = (int)(x >> 36), xm = (int)((x >> 18) & 0x3FFFF), xl = (int)(x & 0x3FFFF);' if wide else ''
     body = [_resid_code(i, p, wide, f'out[(size_t){i} * plane + base]') for i, p in enumerate(ALL_MODULI[:n])]
     return r'''
 extern "C" __global__ void quant3t(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,

@@ -68,7 +68,7 @@ DEFAULTS = {
     'coarse_conv_tol': 1e-2,
     'crt_moduli_coarse': 8,       # INT8 moduli (K and XC) in the coarse stage: ~1e-6 relative accuracy
     'crt_moduli_final': 11,       # ... in the final stage: ~3e-10
-    'crt_moduli_cderi': 14,       # DF-tensor build GEMM (aux-metric transform): static, so always accurate (~1e-12)
+    'crt_moduli_cderi': 15,       # DF-tensor build GEMM (aux-metric transform): static, so always accurate (~1e-12)
     'final_vv10': 'fp32',         # VV10 precision in the final stage of the 'crt' scheme (FP32 error ~1e-9 in E)
     'k_precision': None,          # DF-K GEMMs: 'fp32' | 'tf32x3'; None -> auto by GPU generation
     'xc_precision': None,         # XC grid GEMMs (rho, vmat): same choices

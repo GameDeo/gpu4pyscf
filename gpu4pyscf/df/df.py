@@ -576,7 +576,7 @@ def _cderi_task(intopt, cd_low, task_list, _cderi, aux_blksize,
 # Precision of the aux-metric transform j3c @ L^-T of the DF tensor build (the one big FP64 GEMM of the build):
 # 'fp64' or 'crt' (INT8 residue GEMMs with CDERI_CRT_MODULI moduli, ~1e-12 relative; see gpu4pyscf.lib.crt_gemm).
 CDERI_PRECISION = 'fp64'
-CDERI_CRT_MODULI = 14
+CDERI_CRT_MODULI = 15
 
 def _j3c_dot(j3c, c, out):
     if CDERI_PRECISION == 'crt' and j3c.dtype == np.float64 and c.dtype == np.float64:
