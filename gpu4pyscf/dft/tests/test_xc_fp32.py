@@ -72,6 +72,29 @@ class KnownValues(unittest.TestCase):
     def test_mgga_tf32x3(self):
         self._check('wb97m-v', 'tf32x3')
 
+    def test_nlc_grid_fp32(self):
+        '''nr_nlc_vxc on the NLC grid: FP32 rho and Vxc contractions vs FP64 (fixed density).'''
+        mf2 = dft.RKS(mol, xc='wb97m-v').density_fit()
+        mf2.grids.atom_grid = (30, 110)
+        mf2.nlcgrids.atom_grid = (20, 50)
+        mf2.max_cycle = 3
+        mf2.kernel()
+        dm = mf2.make_rdm1()
+        mf2.nlcgrids.build()
+        res = {}
+        for prec in ('fp64', 'fp32'):
+            old = numint.XC_PRECISION
+            numint.XC_PRECISION = prec
+            try:
+                res[prec] = mf2._numint.nr_nlc_vxc(mol, mf2.nlcgrids, mf2.xc, dm)
+            finally:
+                numint.XC_PRECISION = old
+        (n0, e0, v0), (n1, e1, v1) = res['fp64'], res['fp32']
+        dv = float(cupy.abs(v1 - v0).max())
+        print(f'[nlc fp32] dN={float(n1 - n0):.2e} dE={e1 - e0:.2e} max|dV|={dv:.2e}')
+        self.assertLess(abs(e1 - e0), 1e-6)
+        self.assertLess(dv, 1e-6)
+
 
 if __name__ == "__main__":
     print("Full Tests for XC fp32")

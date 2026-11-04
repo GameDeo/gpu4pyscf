@@ -136,6 +136,40 @@ def _get_denlc(ks_grad, mol, dm):
             ni, mol, nlcgrids, xc, dm, verbose=ks_grad.verbose)
     return enlc1_per_atom, enlc
 
+# Contract-first evaluation of the XC gradient on a grid block (exact, ~3x fewer FLOPs).
+# The legacy path builds vtmp[n,i,j] (3 matrices of nao_sub^2 per term, 15 GEMMs/block for MGGA) and then
+# only needs sum_j vtmp[n,i,j] * dm[i,j].  Contracting dm into the AO-times-weight factors first needs
+# one GEMM per term (5 for MGGA) and no [3, nao, nao] temporaries.  Set to True to use the legacy path.
+LEGACY_EXC_GRAD = False
+
+def _apply_dm(dm_mask, x):
+    '''D x, with D given as a matrix or as an occupied-orbital factor C (D = C C^T, applied as C (C^T x),
+    which costs nocc/nao of the dense product).'''
+    if isinstance(dm_mask, tuple):
+        c = dm_mask[0]
+        return c.dot(c.T.dot(x))
+    return dm_mask.dot(x)
+
+def _exc1_block(ao, wv, dm_mask, xctype, buf=None):
+    '''sum_j vtmp[n,i,j]*dm_mask[i,j] as [nao_sub, 3] for one grid block.'''
+    if xctype == 'LDA':
+        aow = numint._scale_ao(ao[0], wv, out=None)
+        y = _apply_dm(dm_mask, aow)
+        return (ao[1:4] * y).sum(axis=2).T
+    # GGA / MGGA: wv = [nvar, ng]; first four rows are the (rho, nabla rho) weights
+    aow = numint._scale_ao(ao[:4], wv[:4], out=None)
+    y = _apply_dm(dm_mask, aow)
+    exc1 = (ao[1:4] * y).sum(axis=2)                       # d_n(phi_i) * (D aow)_i
+    z = _apply_dm(dm_mask, ao[0])
+    aow_dr = _make_dR_dao_w(ao, wv[:4], out=None)
+    exc1 += (aow_dr * z).sum(axis=2)                      # d_n(aow-like term) * (D phi)_i
+    if xctype == 'MGGA':
+        idx = ([4, 5, 6], [5, 7, 8], [6, 8, 9])
+        for d in range(3):
+            w = _apply_dm(dm_mask, numint._scale_ao(ao[1 + d], wv[4], out=None))
+            exc1 += (ao[idx[d]] * w).sum(axis=2)
+    return exc1.T
+
 def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
                   verbose=None, with_lapl=False, device_id=0):
     ''' Calculate the gradient of vxc on given device
@@ -160,6 +194,13 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
         log.debug(f"{ngrids_local} grids on Device {device_id}")
 
         exc1_ao = cupy.zeros((nao,3))
+        # occupied-orbital factor of the density matrix (exact if dm == C C^T, checked below)
+        c_occ = None
+        if not LEGACY_EXC_GRAD:
+            occ_mask = mo_occ > 0
+            c_occ = cupy.asarray(mo_coeff[:, occ_mask] * mo_occ[occ_mask]**.5, order='C')
+            if float(cupy.abs(c_occ.dot(c_occ.T) - dm).max()) > 1e-8:
+                c_occ = None
         vtmp_buf = cupy.empty((3*nao*nao))
         mo_buf = cupy.empty_like(mo_coeff)
         dm_mask_buf = cupy.empty(nao*nao)
@@ -173,9 +214,12 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
                                        mo_occ, None, xctype, buf=aow_buf)
                 vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=0)[1][0]
                 wv = cupy.multiply(weight, vxc, out=vxc)
+                dm_mask = take_last2d(dm, idx, out=dm_mask_buf) if c_occ is None else None
+                if not LEGACY_EXC_GRAD:
+                    exc1_ao[idx] += _exc1_block(ao_mask, wv, (c_occ[idx],) if c_occ is not None else dm_mask, 'LDA')
+                    continue
                 aow = numint._scale_ao(ao_mask[0], wv, out=aow_buf)
                 vtmp = _d1_dot_(ao_mask[1:4], aow.T, out=vtmp_buf)
-                dm_mask = take_last2d(dm, idx, out=dm_mask_buf)
                 exc1_ao[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
         elif xctype == 'GGA':
 
@@ -189,8 +233,11 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
                 vxc = ni.eval_xc_eff(xc_code, rho, 1, xctype=xctype, spin=0, work=aow_buf)[1]
                 wv = cupy.multiply(weight, vxc, out=vxc)
                 wv[0] *= .5
+                dm_mask = take_last2d(dm, idx, out=dm_mask_buf) if c_occ is None else None
+                if not LEGACY_EXC_GRAD:
+                    exc1_ao[idx] += _exc1_block(ao_mask, wv, (c_occ[idx],) if c_occ is not None else dm_mask, 'GGA')
+                    continue
                 vtmp = _gga_grad_sum_(ao_mask, wv, buf=aow_buf, out=vtmp_buf)
-                dm_mask = take_last2d(dm, idx, out=dm_mask_buf)
                 exc1_ao[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
 
         elif xctype == 'NLC':
@@ -208,9 +255,12 @@ def _get_exc_task(ni, mol, grids, xc_code, dms, mo_coeff, mo_occ,
                 wv = cupy.multiply(weight, vxc, out=vxc)
                 wv[0] *= .5
                 wv[4] *= .5  # for the factor 1/2 in tau
+                dm_mask = take_last2d(dm, idx, out=dm_mask_buf) if c_occ is None else None
+                if not LEGACY_EXC_GRAD:
+                    exc1_ao[idx] += _exc1_block(ao_mask, wv, (c_occ[idx],) if c_occ is not None else dm_mask, 'MGGA')
+                    continue
                 vtmp = _gga_grad_sum_(ao_mask, wv, buf=aow_buf, out=vtmp_buf)
                 vtmp = _tau_grad_dot_(ao_mask, wv[4], accumulate=True, buf=aow_buf, out=vtmp)
-                dm_mask = take_last2d(dm, idx, out=dm_mask_buf)
                 exc1_ao[idx] += cupy.einsum('nij,ij->ni', vtmp, dm_mask).T
 
         log.timer_debug1('gradient of vxc', *t0)

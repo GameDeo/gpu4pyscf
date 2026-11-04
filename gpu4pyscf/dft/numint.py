@@ -51,6 +51,11 @@ VV10_PRECISION = getattr(__config__, 'vv10_precision', 'fp64')
 # GEMMs on tensor cores using 3xTF32 error-compensated emulation of FP32 (Ampere or newer).
 # Results carry ~1e-6 relative errors: intended for the early stage of a mixed-precision SCF.
 XC_PRECISION = getattr(__config__, 'xc_precision', 'fp64')
+# Which grid contractions XC_PRECISION applies to: 'rho' (density from AO x MO) and/or 'vmat' (AO x AO matrix).
+XC_REDUCED_PARTS = ('rho', 'vmat')
+# Reduced-precision Vxc matrix: grid points per FP32 GEMM before the partial result is added to the FP64
+# accumulator (0 = a whole 4096-point block).  FP32 accumulation error grows ~sqrt(chunk).
+XC_VMAT_CHUNK = 0
 
 # Should we release the cupy cache?
 FREE_CUPY_CACHE = False
@@ -550,6 +555,8 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
         # reduced-precision grid contractions (see XC_PRECISION); needs the MO-based rho path
         fp32_xc = (XC_PRECISION in ('fp32', 'tf32x3') and mo_coeff is not None
                    and xctype in ('LDA', 'GGA', 'MGGA'))
+        fp32_rho = fp32_xc and 'rho' in XC_REDUCED_PARTS
+        fp32_vmat = fp32_xc and 'vmat' in XC_REDUCED_PARTS
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(
                 _sorted_mol, grids, nao, ao_deriv, max_memory=None,
@@ -567,7 +574,7 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                 assert hermi == 1
                 cpos = mo_buf[:nao_sub*nocc].reshape(nao_sub,nocc)
                 cpos = cupy.take(mo_coeff, idx, axis=0, out=cpos)
-                if fp32_xc:
+                if fp32_rho:
                     rho_tot[:,p0:p1] = _eval_rho2_fp32(
                         ao_mask.astype(np.float32), cpos.astype(np.float32), xctype)
                 else:
@@ -596,7 +603,7 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
 
         vtmp_buf = cupy.empty(nao*nao)
         vmat = cupy.zeros((nao, nao))
-        if fp32_xc:
+        if fp32_vmat:
             wv32 = wv.astype(np.float32)
             vtmp32_buf = cupy.zeros(nao*nao, dtype=np.float32)
         p0 = p1 = 0
@@ -605,10 +612,16 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                 grid_range=(grid_start, grid_end)):
             p1 = p0 + weight.size
             nao_sub = len(idx)
-            if fp32_xc:
+            if fp32_vmat:
                 vtmp32 = cupy.ndarray((nao_sub, nao_sub), dtype=np.float32, memptr=vtmp32_buf.data)
-                _vmat_block_fp32(ao_mask.astype(np.float32), wv32[:,p0:p1], xctype, vtmp32)
-                add_sparse(vmat, vtmp32.astype(np.float64), idx)
+                ao32 = ao_mask.astype(np.float32)
+                ng_blk = p1 - p0
+                step = XC_VMAT_CHUNK if XC_VMAT_CHUNK > 0 else ng_blk
+                for c0 in range(0, ng_blk, step):
+                    c1 = min(c0 + step, ng_blk)
+                    _vmat_block_fp32(ao32[..., c0:c1] if ao32.ndim == 3 else ao32[:, c0:c1],
+                                     wv32[:, p0+c0:p0+c1], xctype, vtmp32)
+                    add_sparse(vmat, vtmp32.astype(np.float64), idx)
                 p0 = p1
                 continue
             vtmp = cupy.ndarray((nao_sub, nao_sub), memptr=vtmp_buf.data)
@@ -1773,9 +1786,17 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
 
     ao_deriv = 1
     vvrho = []
+    # reduced-precision grid contractions on the NLC grid (XC_PRECISION, MO-based rho path only)
+    fp32_xc = (XC_PRECISION in ('fp32', 'tf32x3') and mo_coeff is not None and mo_coeff.ndim == 2)
+    if fp32_xc:
+        occ_mask = mo_occ > 0
+        cpos_all = cupy.asarray(mo_coeff[:, occ_mask], order='C') * mo_occ[occ_mask]**.5
+        cpos_all = cpos_all.astype(np.float32)
     for ao, idx, weight, coords \
             in ni.block_loop(_sorted_mol, grids, nao, ao_deriv, max_memory=max_memory):
-        if mo_coeff is None:
+        if fp32_xc:
+            rho = _eval_rho2_fp32(ao.astype(np.float32), cpos_all[idx], 'GGA').astype(np.float64)
+        elif mo_coeff is None:
             rho = eval_rho(_sorted_mol, ao, dms[idx[:,None],idx], xctype='GGA', hermi=1)
         elif mo_coeff.ndim == 2:
             rho = eval_rho2(_sorted_mol, ao, mo_coeff[idx,:], mo_occ, None, 'GGA')
@@ -1808,6 +1829,12 @@ def nr_nlc_vxc(ni, mol, grids, xc_code, dms, relativity=0, hermi=1,
         p0, p1 = p1, p1 + weight.size
         wv = vv_vxc[:,p0:p1] * weight
         wv[0] *= .5
+        if fp32_xc:
+            nsub = len(mask)
+            vtmp32 = cupy.empty((nsub, nsub), dtype=np.float32)
+            _vmat_block_fp32(ao.astype(np.float32), wv.astype(np.float32), 'GGA', vtmp32)
+            add_sparse(vmat, vtmp32.astype(np.float64), mask)
+            continue
         aow = _scale_ao(ao, wv)
         add_sparse(vmat, ao[0].dot(aow.T), mask)
     t1 = log.timer_debug1('integration', *t1)

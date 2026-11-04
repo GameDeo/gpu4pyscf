@@ -100,6 +100,7 @@ def main():
     p.add_argument('--mixed', default=None, choices=['fp32', 'tf32x3'], help='staged mixed-precision SCF (K precision of stage 1)')
     p.add_argument('--xcprec', default='fp64', choices=['fp64', 'fp32', 'tf32x3'], help='precision of XC grid GEMMs (all iterations)')
     p.add_argument('--final_grad_factor', type=float, default=None, help='stage-2 gradient-threshold factor of the staged scheme')
+    p.add_argument('--no1b', action='store_true', help='disable stage 1b (FP64 K + reduced XC polish)')
     p.add_argument('--grad', action='store_true')
     p.add_argument('--profile', action='store_true', help='add fine-grained (synchronising) timers inside the XC pipeline')
     p.add_argument('--warmup', action='store_true', help='run a tiny SCF first to exclude JIT costs')
@@ -136,6 +137,8 @@ def main():
         mf.mixed_precision = {'k_precision': args.mixed, 'xc_precision': args.mixed}
         if args.final_grad_factor is not None:
             mf.mixed_precision['final_grad_factor'] = args.final_grad_factor
+        if args.no1b:
+            mf.mixed_precision['stage1b'] = False
     mf.max_cycle = args.max_cycle
     for s in args.set:
         k, v = s.split('=')
@@ -158,6 +161,7 @@ def main():
            'nao': int(mol.nao), 'stages': {k: {'sec': v[0], 'calls': v[1]} for k, v in STAGES.items()}}
     res['cycles'] = int(getattr(mf, 'cycles', -1))
     res['cycles_stage1'] = int(getattr(mf, 'cycles_stage1', 0))
+    res['cycles_stage1b'] = int(getattr(mf, 'cycles_stage1b', 0))
     try:
         dfobj = mf.with_df
         nbytes = 0
@@ -178,7 +182,7 @@ def main():
         res['grad_time'] = time.perf_counter() - t0
         res['grad'] = np.asarray(g).tolist()
 
-    print(f'E = {e:.10f}  converged={mf.converged}  cycles(stage2/FP64)={res["cycles"]} stage1={res["cycles_stage1"]}  '
+    print(f'E = {e:.10f}  converged={mf.converged}  cycles(stage2/FP64)={res["cycles"]} stage1={res["cycles_stage1"]} stage1b={res["cycles_stage1b"]}  '
           f'ngrids={res["ngrids"]} nlc_ngrids={res["nlc_ngrids"]}')
     print(f'SCF wall time: {t_scf:.2f} s   ({t_scf / max(res["cycles"], 1):.2f} s/cycle incl. setup)')
     print(f'{"stage":32s} {"total/s":>9s} {"calls":>6s} {"per-call/s":>11s}')

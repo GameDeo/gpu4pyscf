@@ -274,6 +274,20 @@ def _kernel(mf, conv_tol=1e-10, conv_tol_grad=None,
         # Note in pbc.scf, mf.mol == mf.cell, cell is saved under key "mol"
         chkfile.save_mol(mol, mf.chkfile)
 
+    if getattr(mf, '_accept_converged_init', False) and hasattr(dm, 'mo_coeff'):
+        # Final stage of a mixed-precision SCF: the density handed over by the reduced-precision stages
+        # is usually already converged; one exact Fock build certifies it (E[dm0] is variational, so its
+        # error is second order in the density error) and saves the Roothaan step plus its check build.
+        fock = mf.get_fock(h1e, s1e, vhf, dm)
+        norm_gorb = cupy.linalg.norm(mf.get_grad(dm.mo_coeff, dm.mo_occ, fock))
+        log.info('init |g|= %4.3g (threshold %g)', norm_gorb, conv_tol_grad)
+        if norm_gorb < conv_tol_grad:
+            mf.cycles = 0
+            mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
+            mo_occ = mf.get_occ(mo_energy, mo_coeff)
+            return True, e_tot, mo_energy, mo_coeff, mo_occ
+        fock = None
+
     fock_last = None
     mf.cycles = 0
     for cycle in range(mf.max_cycle):
@@ -392,13 +406,17 @@ def scf(mf, dm0=None, **kwargs):
         from gpu4pyscf.scf import mixed_precision
         dm0 = mixed_precision.run_fast_stage(mf, dm0, **kwargs)
         conv_tol_grad = mixed_precision.final_conv_tol_grad(mf)
+        mf._accept_converged_init = True
 
     if mf.max_cycle > 0 or mf.mo_coeff is None:
-        mf.converged, mf.e_tot, \
-                mf.mo_energy, mf.mo_coeff, mf.mo_occ = \
-                _kernel(mf, mf.conv_tol, conv_tol_grad,
-                        dm0=dm0, callback=mf.callback,
-                        conv_check=mf.conv_check, **kwargs)
+        try:
+            mf.converged, mf.e_tot, \
+                    mf.mo_energy, mf.mo_coeff, mf.mo_occ = \
+                    _kernel(mf, mf.conv_tol, conv_tol_grad,
+                            dm0=dm0, callback=mf.callback,
+                            conv_check=mf.conv_check, **kwargs)
+        finally:
+            mf._accept_converged_init = False
     else:
         # Avoid to update SCF orbitals in the non-SCF initialization
         # (issue #495).  But run regular SCF for initial guess if SCF was

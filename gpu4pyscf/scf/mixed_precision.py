@@ -58,6 +58,8 @@ DEFAULTS = {
     # reaches the usual threshold with a larger residual than a pure FP64 DIIS path, which showed
     # up as 3.4x larger gradient errors; tightening by 0.1 gives gradients ~5x closer to a |g|<1e-7 reference than plain FP64 at default tolerance.
     'final_grad_factor': 0.1,
+    'stage1b': True,              # FP64-K / reduced-XC polish between stage 1 and the FP64 stage
+    'max_cycle_1b': 15,
 }
 
 
@@ -87,33 +89,83 @@ def fast_precision(opt):
         numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION = old
 
 
-def run_fast_stage(mf, dm0, **kwargs):
-    '''Run stage 1 and return the density matrix (tagged with mo_coeff/mo_occ) to
-    start the FP64 stage from.'''
+class _Plateau(Exception):
+    '''Raised from the SCF callback when |g| stops improving (reduced-precision noise floor).'''
+
+
+def _plateau_callback(target, window=3, rel=0.7):
+    '''Callback that remembers the latest orbitals and aborts the cycle loop once |g| has not improved
+    by at least `rel` over the last `window` cycles while still above `target`.'''
+    hist = []
+    state = {}
+
+    def cb(env):
+        g = float(env['norm_gorb'])
+        hist.append(g)
+        state['mo_coeff'] = env['mo_coeff']
+        state['mo_occ'] = env['mo_occ']
+        state['e_tot'] = env['e_tot']
+        state['cycle'] = env['cycle'] + 1
+        if g > target and len(hist) > window and g > rel * min(hist[-window - 1:-1]):
+            raise _Plateau
+    return cb, state
+
+
+def _run_stage(mf, dm0, conv_tol, conv_tol_grad, max_cycle, callback=None, **kwargs):
     from gpu4pyscf.scf import hf
-    log = logger.new_logger(mf)
-    opt = get_options(mf)
     saved = mf.max_cycle
     saved_tol = mf.conv_tol
     try:
-        mf.max_cycle = min(saved, opt['max_cycle'])
-        # _kernel reads mf.conv_tol and ignores its conv_tol argument
-        mf.conv_tol = opt['conv_tol']
-        with fast_precision(opt):
-            log.info('Mixed precision SCF, stage 1: K=%s XC=%s VV10=%s conv_tol_grad=%g',
-                     opt['k_precision'], opt['xc_precision'], opt['vv10_precision'],
-                     opt['conv_tol_grad'])
-            conv, e_tot, mo_energy, mo_coeff, mo_occ = hf._kernel(
-                mf, opt['conv_tol'], opt['conv_tol_grad'], dm0=dm0,
-                callback=None, conv_check=False, **kwargs)
+        mf.max_cycle = max_cycle
+        mf.conv_tol = conv_tol  # _kernel reads mf.conv_tol and ignores its conv_tol argument
+        return hf._kernel(mf, conv_tol, conv_tol_grad, dm0=dm0, callback=callback,
+                          conv_check=False, **kwargs)
     finally:
         mf.max_cycle = saved
         mf.conv_tol = saved_tol
+
+
+def run_fast_stage(mf, dm0, **kwargs):
+    '''Run the reduced-precision stages and return the density matrix (tagged with mo_coeff/mo_occ)
+    to start the final FP64 stage from.
+
+    stage 1  : K, XC, VV10 all reduced precision, down to |g| < conv_tol_grad (K's FP32 noise floor
+               is |g| ~ 1e-4).
+    stage 1b : K in FP64, XC (and VV10) still reduced, down to the final FP64-stage threshold or until
+               |g| plateaus.  FP32 XC alone has a noise floor |g| ~ 1e-5 (measured, Bisphenol A /
+               def2-TZVP), well below the final threshold, so the expensive FP64 XC is only needed
+               for the last few cycles that fix the energy.  Skipped when XC is FP64 anyway.
+    '''
+    log = logger.new_logger(mf)
+    opt = get_options(mf)
+    with fast_precision(opt):
+        log.info('Mixed precision SCF, stage 1: K=%s XC=%s VV10=%s conv_tol_grad=%g',
+                 opt['k_precision'], opt['xc_precision'], opt['vv10_precision'], opt['conv_tol_grad'])
+        conv, e_tot, mo_energy, mo_coeff, mo_occ = _run_stage(
+            mf, dm0, opt['conv_tol'], opt['conv_tol_grad'], min(mf.max_cycle, opt['max_cycle']), **kwargs)
     mf.cycles_stage1 = getattr(mf, 'cycles', -1)
     log.info('Mixed precision SCF, stage 1 done: E=%.12g converged=%s cycles=%s',
              e_tot, conv, mf.cycles_stage1)
-    dm = mf.make_rdm1(mo_coeff, mo_occ)
-    return tag_array(dm, mo_coeff=mo_coeff, mo_occ=mo_occ)
+    dm = tag_array(mf.make_rdm1(mo_coeff, mo_occ), mo_coeff=mo_coeff, mo_occ=mo_occ)
+
+    mf.cycles_stage1b = 0
+    if opt['xc_precision'] != 'fp64' and opt['stage1b'] and mf.max_cycle > 0:
+        target = final_conv_tol_grad(mf)
+        opt1b = dict(opt, k_precision='fp64')
+        cb, state = _plateau_callback(target)
+        with fast_precision(opt1b):
+            log.info('Mixed precision SCF, stage 1b: K=fp64 XC=%s VV10=%s conv_tol_grad=%g',
+                     opt['xc_precision'], opt['vv10_precision'], target)
+            try:
+                conv, e_tot, mo_energy, mo_coeff, mo_occ = _run_stage(
+                    mf, dm, 1e-6, target, min(mf.max_cycle, opt['max_cycle_1b']), callback=cb, **kwargs)
+            except _Plateau:
+                log.info('Mixed precision SCF, stage 1b: |g| plateau reached')
+                mo_coeff, mo_occ, e_tot = state['mo_coeff'], state['mo_occ'], state['e_tot']
+            mf.cycles_stage1b = state.get('cycle', getattr(mf, 'cycles', -1))
+        log.info('Mixed precision SCF, stage 1b done: E=%.12g cycles=%s', e_tot, mf.cycles_stage1b)
+        dm = tag_array(mf.make_rdm1(mo_coeff, mo_occ), mo_coeff=mo_coeff, mo_occ=mo_occ)
+    return dm
 
 
 def final_conv_tol_grad(mf):
