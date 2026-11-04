@@ -1,3 +1,5 @@
+> **Start with `HANDOFF.md` (complete session handoff: state, design, results, negatives, ranked open work). This file keeps the running notes.**
+
 # Where we are / what to do next (parked while the theory discussion runs)
 
 Branch: `claude/serene-meitner-kinyv4` (local only; push blocked until GitHub access is set up; do not open a PR unless asked).
