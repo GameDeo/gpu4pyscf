@@ -488,6 +488,36 @@ class _DFHF:
             obj.spin_samples = self.spin_samples
         return obj
 
+# Precision of the K build GEMMs: 'fp64' (default) or 'fp32'.
+# In 'fp32' mode the DF tensor block is cast to FP32 on the fly, the two large
+# contractions run in FP32 (no FP64 pipe involved) and each block's contribution is
+# accumulated into an FP64 vk.  The result has ~1e-6 relative accuracy; it is intended
+# for the early SCF iterations (see gpu4pyscf.scf.mixed_precision).
+K_PRECISION = 'fp64'
+
+_unpack_tril_fp32 = cupy.ElementwiseKernel(
+    'raw float32 a, raw int32 pair_idx, int32 nao, int32 npairs',
+    'raw float32 out',
+    '''
+    long long l = i / npairs;
+    int p = i - l * npairs;
+    int ij = pair_idx[p];
+    int r = ij / nao;
+    int c = ij - r * nao;
+    float v = a[i];
+    long long base = l * (long long)nao * nao;
+    out[base + (long long)r * nao + c] = v;
+    out[base + (long long)c * nao + r] = v;
+    ''', 'unpack_tril_fp32')
+
+def _fill_symmetric_fp32(cderi_tril32, pair_idx, nao, out):
+    '''out[l,r,c] = out[l,c,r] = cderi_tril32[l,p] for (r,c) = divmod(pair_idx[p], nao)'''
+    nL, npairs = cderi_tril32.shape
+    assert out.shape[0] >= nL and out.dtype == numpy.float32
+    out = out[:nL]
+    _unpack_tril_fp32(cderi_tril32, pair_idx, nao, npairs, out, size=nL*npairs)
+    return out
+
 def get_jk(dfobj, dms, hermi=0, with_j=True, with_k=True,
            omega=None, lr_factor=None, sr_factor=None):
     '''
@@ -536,11 +566,18 @@ def get_jk(dfobj, dms, hermi=0, with_j=True, with_k=True,
             dm_sparse *= 2
         dm_sparse[:,diags] *= .5
 
+    fp32_k = with_k and K_PRECISION == 'fp32' and not numpy.iscomplexobj(dm_factor_l)
+    kdt = numpy.float32 if fp32_k else numpy.float64
+
     def proc():
         factor_l = cp.asarray(dm_factor_l).reshape(nspin,-1,nao,nocc)
         factor_r = dm_factor_r
         if factor_r is not None:
             factor_r = cp.asarray(factor_r).reshape(nspin,-1,nao,nocc)
+        if fp32_k:
+            factor_l = factor_l.astype(kdt)
+            if factor_r is not None:
+                factor_r = factor_r.astype(kdt)
 
         vj = vk = None
         if with_j:
@@ -558,47 +595,65 @@ def get_jk(dfobj, dms, hermi=0, with_j=True, with_k=True,
             assert dm_batch_size > 0
             log.debug1('blksize=%d, dm_batch_size=%d', blksize, dm_batch_size)
 
+            # Note: cuTENSOR evaluates alpha*A*B + beta*C without special-casing beta == 0, so
+            # uninitialized FP32 output buffers (which may hold NaN/Inf bit patterns) must be zeroed.
+            alloc = cp.zeros if fp32_k else cp.empty
             if dm_factor_mode == 0:
-                buf = cp.empty((dm_batch_size, blksize * nao*nocc))
+                buf = alloc((dm_batch_size, blksize * nao*nocc), dtype=kdt)
             elif dm_factor_mode == 1:
-                buf = cp.empty((2 * dm_batch_size, blksize * nao*nocc))
+                buf = alloc((2 * dm_batch_size, blksize * nao*nocc), dtype=kdt)
             else:
-                buf = cp.empty((dm_batch_size+1, blksize * nao*nocc))
+                buf = alloc((dm_batch_size+1, blksize * nao*nocc), dtype=kdt)
                 buf1 = buf[-1]
+            if fp32_k:
+                work32 = cp.zeros((blksize, nao, nao), dtype=kdt)
+                vk_blk = cp.zeros((dm_batch_size, nao, nao), dtype=kdt)
+                pair_idx32 = cp.asarray(dfobj._cderi_idx[0], dtype=numpy.int32)
 
-        for cderi, cderi_tril in dfobj.loop(blksize=blksize, unpack=with_k):
+        def _acc_vk(pattern, a, b, out):
+            if not fp32_k:
+                contract(pattern, a, b, beta=1, out=out)
+            else:
+                # FP32 partial product for this block, accumulated in FP64
+                tmp = vk_blk[:out.shape[0]]
+                contract(pattern, a, b, beta=0, out=tmp)
+                out += tmp
+
+        for cderi, cderi_tril in dfobj.loop(blksize=blksize, unpack=with_k and not fp32_k):
             if with_j:
                 auxvec = contract('np,Lp->nL', _dm_sparse, cderi_tril)
                 contract('nL,Lp->np', auxvec, cderi_tril, beta=1, out=vj)
 
             if with_k:
+                if fp32_k:
+                    cderi = _fill_symmetric_fp32(cderi_tril.astype(kdt), pair_idx32, nao, work32)
                 nL = len(cderi)
                 for s in range(nspin):
                     if dm_factor_mode == 0:
                         for i0, i1 in lib.prange(0, n_dm, dm_batch_size):
-                            rhok = ndarray((i1-i0,nao,nocc,nL), buffer=buf)
+                            rhok = ndarray((i1-i0,nao,nocc,nL), dtype=kdt, buffer=buf)
                             contract('Lij,njk->nikL', cderi, factor_l[s,i0:i1], out=rhok)
-                            contract('nikL,njkL->nij', rhok, rhok, beta=1, out=vk[s,i0:i1])
+                            _acc_vk('nikL,njkL->nij', rhok, rhok, vk[s,i0:i1])
                     elif dm_factor_mode == 1:
                         for i0, i1 in lib.prange(0, n_dm, dm_batch_size):
-                            rhok, rhok1 = ndarray((2,i1-i0,nao,nocc,nL), buffer=buf)
+                            rhok, rhok1 = ndarray((2,i1-i0,nao,nocc,nL), dtype=kdt, buffer=buf)
                             contract('Lij,njk->nikL', cderi, factor_l[s,i0:i1], out=rhok)
                             contract('Lij,njk->nikL', cderi, factor_r[s,i0:i1], out=rhok1)
-                            contract('nikL,njkL->nij', rhok, rhok1, beta=1, out=vk[s,i0:i1])
+                            _acc_vk('nikL,njkL->nij', rhok, rhok1, vk[s,i0:i1])
                     elif dm_factor_mode == 2:
-                        rhok = ndarray((nao,nocc,nL), buffer=buf1)
+                        rhok = ndarray((nao,nocc,nL), dtype=kdt, buffer=buf1)
                         contract('Lij,jk->ikL', cderi, factor_l[s,0], out=rhok)
                         for i0, i1 in lib.prange(0, n_dm, dm_batch_size):
-                            rhok1 = ndarray((i1-i0,nao,nocc,nL), buffer=buf)
+                            rhok1 = ndarray((i1-i0,nao,nocc,nL), dtype=kdt, buffer=buf)
                             contract('Lij,njk->nikL', cderi, factor_r[s,i0:i1], out=rhok1)
-                            contract('ikL,njkL->nij', rhok, rhok1, beta=1, out=vk[s,i0:i1])
+                            _acc_vk('ikL,njkL->nij', rhok, rhok1, vk[s,i0:i1])
                     else:
-                        rhok1 = ndarray((nao,nocc,nL), buffer=buf1)
+                        rhok1 = ndarray((nao,nocc,nL), dtype=kdt, buffer=buf1)
                         contract('Lij,jk->ikL', cderi, factor_r[s,0], out=rhok1)
                         for i0, i1 in lib.prange(0, n_dm, dm_batch_size):
-                            rhok = ndarray((i1-i0,nao,nocc,nL), buffer=buf)
+                            rhok = ndarray((i1-i0,nao,nocc,nL), dtype=kdt, buffer=buf)
                             contract('Lij,njk->nikL', cderi, factor_l[s,i0:i1], out=rhok)
-                            contract('nikL,jkL->nij', rhok, rhok1, beta=1, out=vk[s,i0:i1])
+                            _acc_vk('nikL,jkL->nij', rhok, rhok1, vk[s,i0:i1])
                 rhok1 = rhok = None
         return vj, vk
 
