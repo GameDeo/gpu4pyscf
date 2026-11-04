@@ -284,3 +284,13 @@ Change of the defect between iterates: cycles 3->5: 1.1 % (XC), 1.6 % (NLC); 5->
 and a frozen defect from a nearly converged density leaves errors ~2e-6 in the Fock matrix.  Modelled gain on T4/BPA is only ~4 s though
 (fine cycle ~3.8 s replaced 4x by coarse cycles ~1.7 s each + two defect evaluations that cost a fine and a coarse XC+NLC): deferred until the coarse cycle
 gets cheaper (K and fixed costs now dominate it).
+
+### Round 3c (T4, BPA): fused build_B + warp-per-point rho kernel in the crt XC path; solvation
+* `_vmat_block_crt` uses the fused-loop `xc_fused.build_B` (same wv convention: row 0 x 1/2, row 4 x 1/4) and `_eval_rho2_crt` writes the half-transformed
+  orbitals with grid points as rows and assembles rho/|nabla rho|/tau with `crt_gemm.rho_from_cT` (one warp per grid point).
+  XC main 26.5 -> 21.9 s, SCF 45.7 -> 39.6 s (dE 1.8e-10, max gradient error 1.08e-7, first-call gradient 19.2 s / steady ~14 s).
+* Implicit solvation (agent branch merged; IEF-PCM water, 3695 surface points, BPA wB97M-V/def2-TZVP; `bench_solvent.py`):
+  crt scheme E = -731.6685517723 vs FP64 -731.6685517725 (2e-10); SCF 61.4 s vs 215.3 s (3.5x).  Solvent costs ~1.06 s per SCF cycle
+  (`_get_vind`: two FP64 point-charge integral passes over the surface points) = 15-17 s of the SCF, and ~4.5 s of the gradient (int1e_grids_ip1/ip2).
+  Fixed by the agent: gradient re-solved the response 3x per call (cache never written), SMD CDS used the ECP-reduced charge as Z, C-PCM/COSMO one solve.
+  Open: DF-projected solvent in the coarse stage / cached or FP32 surface-potential tensor (see RESULTS_solvent.md).
