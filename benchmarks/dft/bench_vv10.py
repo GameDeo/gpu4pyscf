@@ -330,12 +330,14 @@ def load_kernels_module():
 
 # --------------------------------------------------------------------------- driver
 
-# flop accounting (instruction slots per ordered pair, MUFU rcp counted as 4 FP32 slots;
-# FP64 reciprocal counted as 10 DP instructions).  Used for the "achieved" columns.
-FLOPS_PER_PAIR = {  # (instr per ordered pair, nominal flops with FMA=2)
-    'ref64': (20 + 10, 28), 'sib32': (29 + 4, 32),
-    'v1_64': (19 + 10, 26), 'v1_32': (19 + 4, 26),
-    'sym_64': (16 + 8 + 5, 26), 'sym_32': (16 + 4 + 3, 26), 
+# Executed FP-pipe instructions per *ordered* pair (analytic, counted from the source; the
+# reciprocal is excluded for FP32 since MUFU is a separate pipe, and counted as ~8 DFMA for FP64
+# division).  sym_*: 24 instr. per unordered pair + ~0.8 for the column reduce / chunk sums.
+# "util" = pairs/s * instr / (peak_TFLOPS / 2): fraction of the FFMA pipe peak (FMA = 1 instr).
+INSTR_PER_PAIR = {
+    'ref64': 20 + 8, 'sib32': 29,
+    'v1_64': 18 + 8, 'v1_32': 18,
+    'sym_64': 12 + 0.8 + 4, 'sym_32': 12 + 0.8,
 }
 
 
@@ -422,13 +424,12 @@ def main():
             if ref is None:
                 ref = out
             err = rel_errors(d, ref, out) if out is not ref else {}
-            ins, fl = FLOPS_PER_PAIR.get(name, (0, 0))
-            pps = float(n)**2 / t
+            ins = INSTR_PER_PAIR.get(name.rstrip('c'), 0)
+            pps = float(n)**2 / t           # ordered pairs per second (N^2 / t, also for sym)
             prec = '32' if name.rstrip('c').endswith('32') else '64'
-            tflops = pps * fl * 1e-12
-            line = '%-8s %8.3f s  %8.3e pairs/s  %6.2f TFLOPS(nominal)' % (name, t, pps, tflops)
+            line = '%-8s %8.3f s  %8.3e pairs/s  %5.1f instr/pair' % (name, t, pps, ins)
             if peaks:
-                line += ' (%.0f%% of FP%s peak)' % (100 * tflops / peaks[prec], prec)
+                line += '  FP%s-pipe util %3.0f%%' % (prec, 100 * pps * ins * 1e-12 / (peaks[prec] / 2))
             if err:
                 line += '  dEnlc=%.2e relEnlc=%.1e relE=%.1e relU=%.1e relW=%.1e relv0=%.1e relv1=%.1e maxrelE=%.1e' % (
                     err['dEnlc'], err['relEnlc'], err['rel_E'], err['rel_U'], err['rel_W'],
