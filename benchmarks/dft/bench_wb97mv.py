@@ -59,7 +59,6 @@ def install_timers():
     timed('  VV10 kernels (_vv10nlc)', numint, '_vv10nlc')
     timed('DF.build (cderi)', df.DF, 'build')
     timed('df_jk.get_jk', df_jk, 'get_jk')
-    timed('df_jk.get_j', df_jk, 'get_j')
 
 
 def build_mol(args):
@@ -141,7 +140,7 @@ def main():
     print(f'SCF wall time: {t_scf:.2f} s   ({t_scf / max(res["cycles"], 1):.2f} s/cycle incl. setup)')
     print(f'{"stage":32s} {"total/s":>9s} {"calls":>6s} {"per-call/s":>11s}')
     for k, (sec, n) in STAGES.items():
-        print(f'{k:32s} {sec:9.3f} {n:6d} {sec / n:11.3f}')
+        print(f'{k:32s} {sec:9.3f} {n:6d} {sec / max(n, 1):11.3f}')
     # nested timers (indented names) are not part of the top-level sum
     top = sum(v[0] for k, v in STAGES.items() if not k.startswith(' '))
     print(f'{"unaccounted (diag, DIIS, misc)":32s} {t_scf - top:9.3f}')
