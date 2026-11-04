@@ -157,7 +157,8 @@ def _apply_dm(dm_mask, x):
             view = cupy.lib.stride_tricks.as_strided(x, shape=(1, ng, nsub), strides=(0, x.itemsize, ng * x.itemsize))
             ct = cupy.ascontiguousarray(c.T)
             tt, _ = crt_gemm.gemm_planes(view, ct, XC_GRAD_CRT_MODULI)     # (P1, nocc) = (C^T x)^T
-            return crt_gemm.gemm_nt(cupy.ascontiguousarray(c)[None], tt[:ng][None], XC_GRAD_CRT_MODULI)
+            # second product has a short reduction (nocc): the CRT reconstruction would cost more than the GEMM
+            return c.dot(tt[:ng].T)
         return c.dot(c.T.dot(x))
     return dm_mask.dot(x)
 
