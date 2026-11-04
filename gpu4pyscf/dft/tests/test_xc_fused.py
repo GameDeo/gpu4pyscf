@@ -171,8 +171,8 @@ class KnownValues(unittest.TestCase):
             # dm != C C^T: forces the dense density-matrix branch of the gradient
             dm = tag_array(dm + 1e-3 * cupy.ones_like(dm), mo_coeff=dm.mo_coeff, mo_occ=dm.mo_occ)
         ni = mf._numint
-        g0 = _with_flags(lambda: rks_grad.get_exc(ni, mol, mf.grids, xc, dm), XC_FUSED=False)
-        g1 = _with_flags(lambda: rks_grad.get_exc(ni, mol, mf.grids, xc, dm), XC_FUSED=True)
+        g0 = _with_flags(lambda: rks_grad.get_exc(ni, mol, mf.grids, xc, dm)[1], XC_FUSED=False)
+        g1 = _with_flags(lambda: rks_grad.get_exc(ni, mol, mf.grids, xc, dm)[1], XC_FUSED=True)
         self.assertLess(float(cupy.abs(cupy.asarray(g1) - cupy.asarray(g0)).max()), 1e-11)
 
     def test_grad_lda(self):

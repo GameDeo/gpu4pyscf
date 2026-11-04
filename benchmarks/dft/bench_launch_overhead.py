@@ -112,17 +112,28 @@ def main():
 
     def run(label, fn, check=None):
         row = {}
-        for fused in (False, True):
-            numint.XC_FUSED = fused
+        # on a tree without the fused loops only the (original) loops exist: measure them once
+        variants = (False, True) if hasattr(numint, 'XC_FUSED') else (False,)
+        for fused in variants:
+            if hasattr(numint, 'XC_FUSED'):
+                numint.XC_FUSED = fused
             try:
                 wall, res = timed(fn, args.repeat)
                 ncalls = count_calls(fn)
                 nk, busy = kernel_stats(fn)
             finally:
-                numint.XC_FUSED = True
+                if hasattr(numint, 'XC_FUSED'):
+                    numint.XC_FUSED = True
             row['fused' if fused else 'legacy'] = dict(wall=wall, py_calls=ncalls, kernels=nk, gpu_busy=busy)
             row['fused' if fused else 'legacy']['res'] = res
-        r0, r1 = row['legacy'], row['fused']
+        r0 = row['legacy']
+        if 'fused' not in row:
+            r0.pop('res')
+            results[label] = row
+            print(f'{label:28s} wall {r0["wall"]:.3f} s  py calls {r0["py_calls"]}  '
+                  f'kernels {r0["kernels"]}  GPU busy {r0["gpu_busy"]}')
+            return
+        r1 = row['fused']
         err = check(r1.pop('res'), r0.pop('res')) if check else None
         row['rel_diff'] = err
         results[label] = row
@@ -142,7 +153,7 @@ def main():
         run('nr_nlc_vxc fp64', lambda: ni.nr_nlc_vxc(mol, mf.nlcgrids, xc, dm), chk)
     if not args.no_grad:
         def exc_grad():
-            return rks_grad.get_exc(ni, mol, mf.grids, xc, dm)
+            return rks_grad.get_exc(ni, mol, mf.grids, xc, dm)[1]
         run('grad.get_exc', exc_grad, lambda a, b: rel(a, b))
     if args.out:
         with open(args.out, 'w') as f:
