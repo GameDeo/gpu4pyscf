@@ -56,6 +56,10 @@ XC_REDUCED_PARTS = ('rho', 'vmat')
 # Reduced-precision Vxc matrix: grid points per FP32 GEMM before the partial result is added to the FP64
 # accumulator (0 = a whole 4096-point block).  FP32 accumulation error grows ~sqrt(chunk).
 XC_VMAT_CHUNK = 0
+# XC_PRECISION == 'crt': the XC matrix build (vmat part) runs as FP64-class GEMMs emulated with INT8 tensor-core
+# residue products (gpu4pyscf.lib.crt_gemm); rho stays FP64.  Number of INT8 moduli (about 8 bits each):
+# 10 -> ~1e-9, 12 -> ~3e-11, 14 -> ~5e-13 relative to the largest element of each product.
+XC_CRT_MODULI = 11
 
 # Should we release the cupy cache?
 FREE_CUPY_CACHE = False
@@ -504,6 +508,27 @@ def _vmat_block_fp32(ao, wv, xctype, out):
         raise NotImplementedError(f'FP32 XC for {xctype}')
     return out
 
+def _vmat_block_crt(ao, wv, xctype, out):
+    '''FP64-class per-block XC matrix from INT8 residue GEMMs (XC_PRECISION == 'crt'); same contractions as the FP64
+    path, with the reduction over (component, grid) done as one GEMM of length ncomp*ng.'''
+    from gpu4pyscf.lib import crt_gemm
+    if xctype == 'LDA':
+        ao0 = ao if ao.ndim == 2 else ao[0]
+        aow = ao0 * wv[0]
+        return crt_gemm.gemm_nt(ao0, aow, XC_CRT_MODULI, out=out)
+    if xctype == 'GGA':
+        aow = _scale_ao(ao, wv[:4])
+        return crt_gemm.gemm_nt(ao[0], aow, XC_CRT_MODULI, out=out)
+    if xctype == 'MGGA':
+        nao_sub, ng = ao.shape[1:]
+        b = cupy.empty((4, nao_sub, ng))
+        _scale_ao(ao, wv[:4], out=b[0])
+        w_tau = .5 * wv[4]
+        for i in range(1, 4):
+            cupy.multiply(ao[i], w_tau, out=b[i])
+        return crt_gemm.gemm_nt(cupy.ascontiguousarray(ao[:4]), b, XC_CRT_MODULI, out=out)
+    raise NotImplementedError(f'CRT XC for {xctype}')
+
 def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                  verbose=None, with_lapl=False, device_id=0, hermi=1):
     ''' nr_rks task on given device
@@ -606,12 +631,19 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
         if fp32_vmat:
             wv32 = wv.astype(np.float32)
             vtmp32_buf = cupy.zeros(nao*nao, dtype=np.float32)
+        crt_vmat = XC_PRECISION == 'crt' and xctype in ('LDA', 'GGA', 'MGGA')
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(
                 _sorted_mol, grids, nao, ao_deriv, max_memory=None,
                 grid_range=(grid_start, grid_end)):
             p1 = p0 + weight.size
             nao_sub = len(idx)
+            if crt_vmat:
+                vtmp = cupy.ndarray((nao_sub, nao_sub), memptr=vtmp_buf.data)
+                _vmat_block_crt(ao_mask, wv[:, p0:p1], xctype, vtmp)
+                add_sparse(vmat, vtmp, idx)
+                p0 = p1
+                continue
             if fp32_vmat:
                 vtmp32 = cupy.ndarray((nao_sub, nao_sub), dtype=np.float32, memptr=vtmp32_buf.data)
                 ao32 = ao_mask.astype(np.float32)

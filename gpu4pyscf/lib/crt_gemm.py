@@ -1,0 +1,195 @@
+# Copyright 2021-2026 The PySCF Developers. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0.
+'''
+FP64-class GEMM from INT8 tensor-core products via the Chinese remainder theorem (Ozaki-scheme-II style).
+
+    A (m, K) ~ diag(2^ea) Ai 2^-q,   B^T (n, K) ~ diag(2^eb) Bi 2^-q,   Ai, Bi integers with |.| < 2^q
+    C_int = Ai Bi^T is recovered exactly from its residues  (Ai mod p)(Bi mod p)^T  for pairwise-coprime p <= 256;
+    every residue product is an exact int8 x int8 -> int32 cuBLAS GEMM (K * 128^2 < 2^31).
+
+The reduction axis K may be the concatenation of several 'component' slabs (comp, rows, ng) -> (rows, comp*ng); they share
+the row scale, so the whole sum over components and grid points is one residue GEMM per modulus.
+
+The number of moduli n sets the precision (about 8 bits each; q is chosen as large as the modulus product allows,
+capped at `QMAX`).  Needs a GPU with INT8 GEMM support (Turing and newer; m, n, K padded to multiples of 16).
+Design notes and measurements: benchmarks/dft/crt_int8.py, RESULTS_mixed_precision.md.
+'''
+import numpy as np
+import cupy
+
+ALL_MODULI = [256, 255, 253, 251, 247, 241, 239, 233, 229, 227, 223, 211, 199, 197, 193, 191, 181, 179, 173, 167]
+QMAX = 44            # int64 quantization above 30 bits (slower mod)
+MAX_K = 120000       # int32 accumulation limit of one residue GEMM: K * 128^2 < 2^31
+
+_kern = {}
+
+
+def plan(K, nmod, qmax=QMAX):
+    '''q (bits of each operand) such that prod(p_i) > 2 K 2^{2q}.'''
+    bits = float(np.sum(np.log2(ALL_MODULI[:nmod])))
+    q = int((bits - np.log2(K) - 1) // 2)
+    return max(1, min(q, qmax))
+
+
+def _quant_src(n, wide):
+    T = 'long long' if wide else 'int'
+    body = []
+    for i, p in enumerate(ALL_MODULI[:n]):
+        h = (p + 1) // 2
+        body.append(f'{{ {T} r = x % {p}; if (r < 0) r += {p}; if (r >= {h}) r -= {p}; '
+                    f'out[(size_t){i} * plane + idx] = (signed char)r; }}')
+    return r'''
+extern "C" __global__ void quant(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
+                                 int ncomp, int rows, int ng, int rp, int kp, int q, size_t plane)
+{
+    size_t gid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= (size_t)rp * kp) return;
+    int row = (int)(gid / kp), col = (int)(gid % kp);
+    size_t idx = gid;
+    ''' + T + r''' x = 0;
+    if (row < rows && col < ncomp * ng) {
+        int c = col / ng, g = col - c * ng;
+        double v = ldexp(a[((size_t)c * rows + row) * ng + g], q - ex[row]);
+        x = (''' + T + r''')llrint(v);
+    }
+    ''' + '\n    '.join(body) + '\n}\n'
+
+
+def _recon_src(n):
+    mods = ALL_MODULI[:n]
+    lines = []
+    for j, p in enumerate(mods):
+        h = (p + 1) // 2
+        lines.append(f'int c{j} = C[(size_t){j} * plane + idx] % {p}; if (c{j} < 0) c{j} += {p}; if (c{j} >= {h}) c{j} -= {p};')
+    lines.append('int v0 = c0;')
+    for j in range(1, n):
+        p = mods[j]
+        h = (p + 1) // 2
+        lines.append(f'int u{j} = v{j-1};')
+        for i in range(j - 2, -1, -1):
+            lines.append(f'u{j} = (u{j} * {mods[i] % p} + v{i}) % {p};')
+        prod = 1
+        for i in range(j):
+            prod = (prod * mods[i]) % p
+        inv = pow(prod, -1, p)
+        lines.append(f'int d{j} = (c{j} - u{j}) % {p}; if (d{j} < 0) d{j} += {p};')
+        lines.append(f'int v{j} = (d{j} * {inv}) % {p}; if (v{j} >= {h}) v{j} -= {p};')
+    lines.append(f'double x = (double)v{n-1};')
+    for j in range(n - 2, -1, -1):
+        lines.append(f'x = x * {float(mods[j])!r} + (double)v{j};')
+    return r'''
+extern "C" __global__ void recon(const int* __restrict__ C, const int* __restrict__ ea, const int* __restrict__ eb,
+                                 double* __restrict__ out, double* __restrict__ acc_in, int m, int n, int np_, size_t plane,
+                                 int shift, int accumulate)
+{
+    size_t gid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= (size_t)m * n) return;
+    int i = (int)(gid / n), j = (int)(gid % n);
+    size_t idx = (size_t)i * np_ + j;
+    ''' + '\n    '.join(lines) + r'''
+    double r = ldexp(x, ea[i] + eb[j] - shift);
+    out[gid] = accumulate ? out[gid] + r : r;
+}
+'''
+
+
+def _get(kind, n, wide=False):
+    key = (kind, n, wide)
+    k = _kern.get(key)
+    if k is None:
+        if kind == 'q':
+            k = cupy.RawKernel(_quant_src(n, wide), 'quant')
+        else:
+            k = cupy.RawKernel(_recon_src(n), 'recon')
+        _kern[key] = k
+    return k
+
+
+def _pad16(n):
+    return (n + 15) // 16 * 16
+
+
+def _row_exponent(src):
+    '''src [ncomp, rows, ng] -> int32 exponent e with max|src[:, r, :]| < 2^e.'''
+    amax = cupy.abs(src).max(axis=(0, 2))
+    _, e = cupy.frexp(amax)
+    return cupy.where(amax == 0, 0, e).astype(cupy.int32)
+
+
+class Operand:
+    '''Residues of an operand given as float64 [ncomp, rows, ng] (reduction axis = comp x ng).'''
+
+    def __init__(self, src, nmod, q, e=None):
+        assert src.dtype == cupy.float64 and src.flags.c_contiguous
+        ncomp, rows, ng = src.shape
+        self.rows, self.nmod, self.q = rows, nmod, q
+        self.rp, self.kp = _pad16(rows), _pad16(ncomp * ng)
+        self.e = _row_exponent(src) if e is None else e
+        ex = cupy.zeros(self.rp, dtype=cupy.int32)
+        ex[:rows] = self.e
+        self.planes = cupy.empty((nmod, self.rp, self.kp), dtype=cupy.int8)
+        tot = self.rp * self.kp
+        thr = 256
+        _get('q', nmod, q > 30)(((tot + thr - 1) // thr,), (thr,),
+                                (src, ex, self.planes, np.int32(ncomp), np.int32(rows), np.int32(ng),
+                                 np.int32(self.rp), np.int32(self.kp), np.int32(q), np.uint64(tot)))
+
+
+def int8_mm_nt(a, bt, out):
+    '''int32 out (m, n) = a (m, k) @ bt (n, k)^T for contiguous int8 arrays (cublasGemmEx, TN).'''
+    from cupy.cuda import cublas, device
+    m, k = a.shape
+    n = bt.shape[0]
+    alpha = np.array(1, dtype=np.int32)
+    beta = np.array(0, dtype=np.int32)
+    h = device.get_cublas_handle()
+    cublas.gemmEx(h, cublas.CUBLAS_OP_T, cublas.CUBLAS_OP_N, n, m, k,
+                  alpha.ctypes.data, bt.data.ptr, 3, k, a.data.ptr, 3, k,
+                  beta.ctypes.data, out.data.ptr, 10, n, 72, -1)
+    return out
+
+
+def matmul_operands(oa, ob, out, accumulate=False):
+    '''out (rows_a, rows_b) float64 (+)= A B^T from two Operand objects with equal nmod, q and kp.'''
+    assert oa.nmod == ob.nmod and oa.q == ob.q and oa.kp == ob.kp
+    n, q = oa.nmod, oa.q
+    C = cupy.empty((n, oa.rp, ob.rp), dtype=cupy.int32)
+    for i in range(n):
+        int8_mm_nt(oa.planes[i], ob.planes[i], C[i])
+    ea = cupy.zeros(oa.rp, dtype=cupy.int32)
+    ea[:oa.rows] = oa.e
+    eb = cupy.zeros(ob.rp, dtype=cupy.int32)
+    eb[:ob.rows] = ob.e
+    tot = oa.rows * ob.rows
+    thr = 256
+    _get('r', n)(((tot + thr - 1) // thr,), (thr,),
+                 (C, ea, eb, out, out, np.int32(oa.rows), np.int32(ob.rows), np.int32(ob.rp),
+                  np.uint64(oa.rp * ob.rp), np.int32(2 * q), np.int32(1 if accumulate else 0)))
+    return out
+
+
+def gemm_nt(a, b, nmod, out=None, qmax=QMAX):
+    '''A (ncomp, m, ng) , B (ncomp, n, ng) -> out (m, n) = sum_c A[c] B[c]^T in ~FP64 accuracy (K = ncomp*ng).
+    Chunks the grid axis when ncomp*ng exceeds the int32-accumulation limit.'''
+    if a.ndim == 2:
+        a, b = a[None], b[None]
+    ncomp, m, ng = a.shape
+    n = b.shape[1]
+    if out is None:
+        out = cupy.empty((m, n), dtype=cupy.float64)
+    step = max(1, MAX_K // ncomp)
+    first = True
+    for g0 in range(0, ng, step):
+        g1 = min(ng, g0 + step)
+        asub = a[..., g0:g1] if g1 - g0 != ng else a
+        bsub = b[..., g0:g1] if g1 - g0 != ng else b
+        if not asub.flags.c_contiguous:
+            asub = cupy.ascontiguousarray(asub)
+        if not bsub.flags.c_contiguous:
+            bsub = cupy.ascontiguousarray(bsub)
+        q = plan(ncomp * (g1 - g0), nmod, qmax)
+        oa = Operand(asub, nmod, q)
+        ob = Operand(bsub, nmod, q)
+        matmul_operands(oa, ob, out, accumulate=not first)
+        first = False
+    return out

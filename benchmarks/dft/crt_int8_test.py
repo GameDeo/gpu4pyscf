@@ -26,6 +26,7 @@ def main():
     p.add_argument('--k', type=int, default=61440)
     p.add_argument('--q', type=int, default=30)
     p.add_argument('--skip-fp64', action='store_true')
+    p.add_argument('--ns', default='5,6,7,8,9,10,12')
     args = p.parse_args()
     rng = np.random.default_rng(0)
     m, k = args.m, args.k
@@ -43,7 +44,7 @@ def main():
         print(f'native FP64 GEMM: {t64:.1f} ms  ({2 * m * m * k / t64 / 1e9:.3f} TFLOP/s)')
     else:
         t64 = float('nan')
-    for n in (5, 6, 7, 8, 9, 10, 12):
+    for n in [int(x) for x in args.ns.split(',')]:
         if n > len(ci.ALL_MODULI):
             continue
         q = args.q
@@ -62,7 +63,7 @@ def main():
         mp, kp = ra.rp, ra.kp
         Cb = cupy.empty((mp, mp), dtype=cupy.int32)
         t_gemm = timeit(lambda: [ci.int8_mm_nt(ra.planes[i], rb.planes[i], Cb) for i in range(n)])
-        t_rec = t_all - t_gemm
+        t_rec = t_all - t_gemm   # includes buffer alloc; small
         tot = t_quant + t_all
         print(f'n={n:2d} q={q:2d} maxrelerr={err:.2e} | quant(2 ops) {t_quant:6.1f} ms  gemm {t_gemm:6.1f} ms  recon {t_rec:5.1f} ms  total {tot:6.1f} ms'
               f'  speedup vs FP64 {t64 / tot:5.1f}x   int8 GEMM {2 * m * m * k * n / t_gemm / 1e9:.1f} TOPS')
