@@ -99,6 +99,7 @@ def main():
     p.add_argument('--kprec', default='fp64', choices=['fp64', 'fp32'], help='precision of the DF-K GEMMs (all iterations)')
     p.add_argument('--mixed', default=None, choices=['fp32', 'tf32x3'], help='staged mixed-precision SCF (K precision of stage 1)')
     p.add_argument('--xcprec', default='fp64', choices=['fp64', 'fp32', 'tf32x3'], help='precision of XC grid GEMMs (all iterations)')
+    p.add_argument('--final_grad_factor', type=float, default=None, help='stage-2 gradient-threshold factor of the staged scheme')
     p.add_argument('--grad', action='store_true')
     p.add_argument('--profile', action='store_true', help='add fine-grained (synchronising) timers inside the XC pipeline')
     p.add_argument('--warmup', action='store_true', help='run a tiny SCF first to exclude JIT costs')
@@ -133,6 +134,8 @@ def main():
     mf.conv_tol = args.conv_tol
     if args.mixed:
         mf.mixed_precision = {'k_precision': args.mixed, 'xc_precision': args.mixed}
+        if args.final_grad_factor is not None:
+            mf.mixed_precision['final_grad_factor'] = args.final_grad_factor
     mf.max_cycle = args.max_cycle
     for s in args.set:
         k, v = s.split('=')

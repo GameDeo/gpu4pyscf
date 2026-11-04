@@ -44,6 +44,36 @@ def set_tf32(on):
     cupy.cuda.cublas.setMathMode(h, 3 if on else 0)   # 3 = CUBLAS_TF32_TENSOR_OP_MATH
 
 
+_CUBLAS = None
+
+
+def cublas_emulation(on, bits=None):
+    '''cuBLAS >= 13.0.2 fixed-point (Ozaki-style INT8) emulation of FP64 GEMM on the cupy handle.'''
+    import ctypes
+    global _CUBLAS
+    if _CUBLAS is None:
+        for name in ('libcublas.so.13', '/usr/local/cuda/lib64/libcublas.so.13'):
+            try:
+                _CUBLAS = ctypes.CDLL(name)
+                break
+            except OSError:
+                pass
+    h = ctypes.c_void_p(cupy.cuda.device.get_cublas_handle())
+    st = []
+    if on:
+        st.append(_CUBLAS.cublasSetMathMode(h, 8))                 # CUBLAS_FP64_EMULATED_FIXEDPOINT_MATH
+        st.append(_CUBLAS.cublasSetEmulationStrategy(h, 2))        # EAGER: emulate whenever possible
+        if bits:
+            st.append(_CUBLAS.cublasSetFixedPointEmulationMantissaControl(h, 1))     # FIXED
+            st.append(_CUBLAS.cublasSetFixedPointEmulationMaxMantissaBitCount(h, int(bits)))
+    else:
+        st.append(_CUBLAS.cublasSetMathMode(h, 0))
+        st.append(_CUBLAS.cublasSetEmulationStrategy(h, 0))
+    if any(st):
+        print('# cuBLAS emulation call status', st)
+    return st
+
+
 def split_tf32(a):
     '''a (float32) = hi + lo with hi holding 10 mantissa bits (round-to-nearest-away), lo exact.'''
     u = a.view(cupy.uint32)
@@ -93,32 +123,78 @@ def err_stats(c, ref):
     return float(d.max()) / scale, float(cupy.linalg.norm(c - ref) / cupy.linalg.norm(ref))
 
 
+EMUL_BITS = ()
+FP32_VARIANTS = True
+GM8_MODULI = ()
+_GM8 = None
+
+
+def gm8_matmul(a, b, num_moduli, fastmode=1):
+    '''C = a @ b (row-major cupy float64) with GEMMul8 via the extern "C" shim.'''
+    import ctypes
+    global _GM8
+    lib = _GM8
+    M, K = a.shape
+    N = b.shape[1]
+    c = cupy.empty((M, N), dtype=cupy.float64)
+    h = ctypes.c_void_p(cupy.cuda.device.get_cublas_handle())
+    lib.gm8_dgemm.restype = ctypes.c_size_t
+    # row-major C = A B  <=>  column-major C^T = B^T A^T
+    args = [h, 0, 0, N, M, K, ctypes.c_double(1.0), ctypes.c_void_p(b.data.ptr), N,
+            ctypes.c_void_p(a.data.ptr), K, ctypes.c_double(0.0), ctypes.c_void_p(c.data.ptr), N,
+            num_moduli, fastmode]
+    lib.gm8_dgemm.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_size_t, ctypes.c_size_t,
+                              ctypes.c_size_t, ctypes.c_double, ctypes.c_void_p, ctypes.c_size_t,
+                              ctypes.c_void_p, ctypes.c_size_t, ctypes.c_double, ctypes.c_void_p,
+                              ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    need = lib.gm8_dgemm(*args, None)
+    work = cupy.empty(int(need) + 256, dtype=cupy.uint8)
+    lib.gm8_dgemm(*args, ctypes.c_void_p(work.data.ptr))
+    return c
+
+
 def run_case(name, a64, b64, kcs=(0, 1024, 256, 64), reps=7):
+    if not FP32_VARIANTS:
+        kcs = ()
     a = a64.astype(cupy.float32); b = b64.astype(cupy.float32)
     ref = cupy.matmul(a.astype(cupy.float64), b.astype(cupy.float64))
     m, k = a.shape; n = b.shape[1]
     flops = 2.0 * m * n * k
     rows = []
 
-    set_tf32(False)
-    t = bench(lambda: cupy.matmul(a, b), reps)
-    rows.append(('fp32_simt', t, err_stats(cupy.matmul(a, b), ref)))
-    set_tf32(True)
-    t = bench(lambda: cupy.matmul(a, b), reps)
-    rows.append(('tf32_1x', t, err_stats(cupy.matmul(a, b), ref)))
-    set_tf32(False)
+    if FP32_VARIANTS:
+        set_tf32(False)
+        t = bench(lambda: cupy.matmul(a, b), reps)
+        rows.append(('fp32_simt', t, err_stats(cupy.matmul(a, b), ref)))
+        set_tf32(True)
+        t = bench(lambda: cupy.matmul(a, b), reps)
+        rows.append(('tf32_1x', t, err_stats(cupy.matmul(a, b), ref)))
+        set_tf32(False)
     for kc in kcs:
         g = Gemm3x(a, b, kc)
         t = bench(g, reps)
         rows.append((f'tf32_3x kc={kc}', t, err_stats(g(), ref)))
-    try:
-        f = cutensor3x(a, b)
-        t = bench(f, reps)
-        rows.append(('cutensor3x', t, err_stats(f(), ref)))
-    except Exception as ex:
-        rows.append((f'cutensor3x FAILED {type(ex).__name__}', float('nan'), (float('nan'),) * 2))
+    if FP32_VARIANTS:
+        try:
+            f = cutensor3x(a, b)
+            t = bench(f, reps)
+            rows.append(('cutensor3x', t, err_stats(f(), ref)))
+        except Exception as ex:
+            rows.append((f'cutensor3x FAILED {type(ex).__name__}', float('nan'), (float('nan'),) * 2))
+    cublas_emulation(False)
     t64 = bench(lambda: cupy.matmul(a64, b64), reps)
+    ref64 = cupy.matmul(a64, b64)
     rows.append(('fp64 native', t64, (0.0, 0.0)))
+    for nm in GM8_MODULI:
+        t = bench(lambda: gm8_matmul(a64, b64, nm), reps)
+        rows.append((f'GEMMul8 INT8 {nm} moduli', t, err_stats(gm8_matmul(a64, b64, nm), ref64)))
+    for bits in EMUL_BITS:
+        cublas_emulation(True, bits)
+        try:
+            t = bench(lambda: cupy.matmul(a64, b64), reps)
+            rows.append((f'fp64 emulated {bits}b', t, err_stats(cupy.matmul(a64, b64), ref64)))
+        finally:
+            cublas_emulation(False)
     print(f'--- {name}: M={m} N={n} K={k}')
     print(f'{"variant":22s} {"ms":>9s} {"TFLOP/s":>9s} {"max|dC|/max|C|":>15s} {"rel Frob":>10s}')
     for v, t, (emax, efro) in rows:
@@ -133,7 +209,18 @@ def main():
     p.add_argument('--cycles', type=int, default=6)
     p.add_argument('--nblocks', type=int, default=16)
     p.add_argument('--save', default=None, help='np.savez the captured XC operands here')
+    p.add_argument('--emul', type=int, nargs='*', default=[], help='cuBLAS fixed-point emulation mantissa bit counts to test')
+    p.add_argument('--no_fp32', action='store_true', help='skip the FP32/TF32 variants')
+    p.add_argument('--gm8', type=int, nargs='*', default=[], help='GEMMul8 moduli counts to test')
+    p.add_argument('--gm8_lib', default='/content/gm8/libgm8shim.so')
     args = p.parse_args()
+    global EMUL_BITS, FP32_VARIANTS, GM8_MODULI, _GM8
+    GM8_MODULI = tuple(args.gm8)
+    if GM8_MODULI:
+        import ctypes
+        _GM8 = ctypes.CDLL(args.gm8_lib)
+    EMUL_BITS = tuple(args.emul)
+    FP32_VARIANTS = not args.no_fp32
 
     import os
     from gpu4pyscf import dft

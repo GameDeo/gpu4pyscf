@@ -53,8 +53,8 @@ DEFAULTS = {
     'max_cycle': 30,
     # Stage-2 (FP64) gradient threshold = final_grad_factor * (usual threshold).  A staged run
     # reaches the usual threshold with a larger residual than a pure FP64 DIIS path, which showed
-    # up as 3.4x larger gradient errors; tightening by this factor restores FP64-level quality.
-    'final_grad_factor': 0.3,
+    # up as 3.4x larger gradient errors; tightening by 0.1 gives gradients ~5x closer to a |g|<1e-7 reference than plain FP64 at default tolerance.
+    'final_grad_factor': 0.1,
 }
 
 
