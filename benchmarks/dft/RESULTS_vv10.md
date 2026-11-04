@@ -112,7 +112,28 @@ several (NT, MI), FP32, distance cutoff, `_vv10nlc` switch on a real grid) passe
 
 ## T4
 
-T4_SECTION
+**NOT MEASURED.**  No T4 runtime could be allocated (Colab's 2-runtime limit was held by other
+sessions; `t4b` was never created).  The A100 was used once instead (~15 min, `a100v`, stopped).
+Everything below is a *projection from the executed-instruction counts*, not a measurement; run
+`bench_vv10.py --data X.npz --variants ref64,sib32,v1_32,sym_64,sym_32 --peak t4:0.25:8.1`
+(and `sanity.py`-style correctness check first: sm_75 compile, shared-memory FP64 atomicAdd)
+on a T4 to replace it.
+
+T4 peaks: FP64 0.25 TFLOPS (0.125e12 FMA-instr/s), FP32 8.1 TFLOPS (4.05e12 instr/s, at boost
+clock; the 70 W T4 typically sustains 60-75 % of that).  With the counts above and the A100's
+measured pipe utilisation (~90 %), projected at N = 4.3e5 (1.8e11 pairs):
+
+| variant | instr/pair | projected pairs/s | projected time (s) |
+|---|---|---|---|
+| ref64 (FP64 libgdft) | ~28 | ~4e9 | ~45 |
+| sym_64 | ~16.8 | ~7e9 | ~26 (1.6x) |
+| sib32 (existing FP32) | ~29 | ~1.2e11 | ~1.5 |
+| sym_32 | ~12.8 | ~2.8e11 | ~0.65 (2.3x vs sib32, ~70x vs ref64) |
+
+i.e. on the T4 the useful lever is FP32 (`VV10_PRECISION='fp32'`), whose error here (E_nl ~ 5e-10
+relative, 3e-10 Eh in the total energy of a 36-atom system) is already below the 1e-8 Eh target.
+MUFU (1/4 FFMA rate on sm_75) is ~4 FFMA slots per unordered pair, ~8 % of the symmetric kernel,
+not included in the 12.8.
 
 ## What was analysed and did not pay off
 
