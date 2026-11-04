@@ -64,6 +64,7 @@ DEFAULTS = {
     # FP32 stage 1 / 1b and an FP64 final stage; 'auto' picks by GPU generation.
     'scheme': 'auto',
     'coarse_grid': (50, 194),     # atom grid of the first SCF stage (None: full grid from the start)
+    'coarse_nlc_grid': (30, 110),  # NLC atom grid of the coarse stage (None: keep the NLC grid); VV10 is ~20 % of the SCF
     'coarse_conv_tol_grad': 1e-3,
     'coarse_conv_tol': 1e-2,
     'crt_moduli_coarse': 8,       # INT8 moduli (K and XC) in the coarse stage: ~1e-6 relative accuracy
@@ -141,16 +142,24 @@ def final_stage(mf):
 
 
 @contextlib.contextmanager
-def _coarse_grids(mf, grid):
+def _coarse_grids(mf, grid, nlc_grid=None):
     full = mf.grids
     g = copy.copy(full)
     g.reset()
     g.atom_grid = tuple(grid)
     mf.grids = g
+    full_nlc = getattr(mf, 'nlcgrids', None)
+    if nlc_grid is not None and full_nlc is not None:
+        gn = copy.copy(full_nlc)
+        gn.reset()
+        gn.atom_grid = tuple(nlc_grid)
+        mf.nlcgrids = gn
     try:
         yield
     finally:
         mf.grids = full
+        if full_nlc is not None:
+            mf.nlcgrids = full_nlc
 
 
 class _Plateau(Exception):
@@ -204,7 +213,7 @@ def run_fast_stage(mf, dm0, **kwargs):
     opt = get_options(mf)
     coarse = opt['coarse_grid'] if hasattr(mf, 'grids') else None
     if coarse is not None:
-        with _coarse_grids(mf, coarse), fast_precision(opt):
+        with _coarse_grids(mf, coarse, opt['coarse_nlc_grid']), fast_precision(opt):
             log.info('Mixed precision SCF, coarse stage: grid=%s K=%s XC=%s (moduli %s) VV10=%s conv_tol_grad=%g',
                      coarse, opt['k_precision'], opt['xc_precision'], opt.get('xc_moduli'),
                      opt['vv10_precision'], opt['coarse_conv_tol_grad'])
