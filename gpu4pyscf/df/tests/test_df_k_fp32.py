@@ -61,6 +61,15 @@ class KnownValues(unittest.TestCase):
         # J is unchanged by the K precision
         self.assertAlmostEqual(float(cupy.abs(vj1 - vj0).max()), 0, 12)
 
+    def test_k_tf32x3(self):
+        # 3xTF32 must reach FP32-level accuracy, not the ~1e-3 of a plain TF32 GEMM
+        dm = mf.make_rdm1()
+        vj0, vk0 = self._jk('fp64', dm)
+        vj1, vk1 = self._jk('tf32x3', dm)
+        err = float(cupy.abs(vk1 - vk0).max()) / float(cupy.abs(vk0).max())
+        print(f'[test_k_tf32x3] max|dK|/max|K| = {err:.2e}')
+        self.assertLess(err, 5e-6)
+
     def test_k_fp32_plain_dm(self):
         dm = cupy.asarray(np.asarray(mf.make_rdm1().get()))   # plain array -> SVD factorization
         vj0, vk0 = self._jk('fp64', dm)

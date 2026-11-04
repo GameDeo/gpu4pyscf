@@ -386,6 +386,11 @@ def scf(mf, dm0=None, **kwargs):
         # Initial guess from existing wavefunction
         dm0 = mf.make_rdm1()
 
+    if getattr(mf, 'mixed_precision', False) and mf.max_cycle > 0:
+        # Reduced-precision stage 1; the regular FP64 SCF below polishes its density.
+        from gpu4pyscf.scf import mixed_precision
+        dm0 = mixed_precision.run_fast_stage(mf, dm0, **kwargs)
+
     if mf.max_cycle > 0 or mf.mo_coeff is None:
         mf.converged, mf.e_tot, \
                 mf.mo_energy, mf.mo_coeff, mf.mo_occ = \

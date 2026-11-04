@@ -57,8 +57,21 @@ def install_timers():
     timed('XC main (nr_rks)', numint.NumInt, 'nr_rks')
     timed('NLC total (nr_nlc_vxc)', numint.NumInt, 'nr_nlc_vxc')
     timed('  VV10 kernels (_vv10nlc)', numint, '_vv10nlc')
-    timed('DF.build (cderi)', df.DF, 'build')
+    timed('  DF.build (cderi)', df.DF, 'build')  # nested inside get_jk
     timed('df_jk.get_jk', df_jk, 'get_jk')
+
+
+def install_fine_timers():
+    '''Finer-grained (synchronising, so slightly pessimistic) timers inside the XC pipeline.'''
+    from gpu4pyscf.dft import numint
+    timed('  . eval_ao', numint, 'eval_ao')
+    timed('  . eval_rho (_eval_rho2/eval_rho)', numint, '_eval_rho2')
+    timed('  . eval_rho dm path', numint, 'eval_rho')
+    timed('  . eval_xc_eff (libxc)', numint.NumInt, 'eval_xc_eff')
+    timed('  . _scale_ao', numint, '_scale_ao')
+    timed('  . _tau_dot', numint, '_tau_dot')
+    timed('  . add_sparse', numint, 'add_sparse')
+    timed('  . contract (cutensor)', numint, 'contract')
 
 
 def build_mol(args):
@@ -82,7 +95,12 @@ def main():
     p.add_argument('--conv_tol', type=float, default=1e-9)
     p.add_argument('--verbose', type=int, default=4)
     p.add_argument('--max_memory', type=int, default=40000)
+    p.add_argument('--vv10', default='fp64', choices=['fp64', 'fp32'], help='precision of the VV10 pair kernel')
+    p.add_argument('--kprec', default='fp64', choices=['fp64', 'fp32'], help='precision of the DF-K GEMMs (all iterations)')
+    p.add_argument('--mixed', default=None, choices=['fp32', 'tf32x3'], help='staged mixed-precision SCF (K precision of stage 1)')
+    p.add_argument('--xcprec', default='fp64', choices=['fp64', 'fp32', 'tf32x3'], help='precision of XC grid GEMMs (all iterations)')
     p.add_argument('--grad', action='store_true')
+    p.add_argument('--profile', action='store_true', help='add fine-grained (synchronising) timers inside the XC pipeline')
     p.add_argument('--warmup', action='store_true', help='run a tiny SCF first to exclude JIT costs')
     p.add_argument('--out', default=None, help='write a json summary here')
     p.add_argument('--ref', default=None, help='json summary of a reference run to compare against')
@@ -99,13 +117,22 @@ def main():
         wm.nlcgrids.atom_grid = (10, 26)
         wm.kernel()
         wm.nuc_grad_method().kernel() if args.grad else None
+    from gpu4pyscf.dft import numint as _numint
+    from gpu4pyscf.df import df_jk as _df_jk
+    _numint.VV10_PRECISION = args.vv10
+    _df_jk.K_PRECISION = args.kprec
+    _numint.XC_PRECISION = args.xcprec
     install_timers()
+    if args.profile:
+        install_fine_timers()
 
     mol = build_mol(args)
     mf = dft.RKS(mol, xc=args.xc).density_fit(auxbasis=args.auxbasis)
     mf.grids.atom_grid = tuple(args.grid)
     mf.nlcgrids.atom_grid = tuple(args.nlcgrid)
     mf.conv_tol = args.conv_tol
+    if args.mixed:
+        mf.mixed_precision = {'k_precision': args.mixed, 'xc_precision': args.mixed}
     mf.max_cycle = args.max_cycle
     for s in args.set:
         k, v = s.split('=')
@@ -127,6 +154,7 @@ def main():
            'ngrids': int(mf.grids.size), 'nlc_ngrids': int(mf.nlcgrids.size) if mf.do_nlc() else 0,
            'nao': int(mol.nao), 'stages': {k: {'sec': v[0], 'calls': v[1]} for k, v in STAGES.items()}}
     res['cycles'] = int(getattr(mf, 'cycles', -1))
+    res['cycles_stage1'] = int(getattr(mf, 'cycles_stage1', 0))
     if args.grad:
         _sync()
         t0 = time.perf_counter()
@@ -135,7 +163,7 @@ def main():
         res['grad_time'] = time.perf_counter() - t0
         res['grad'] = np.asarray(g).tolist()
 
-    print(f'E = {e:.10f}  converged={mf.converged}  cycles={res["cycles"]}  '
+    print(f'E = {e:.10f}  converged={mf.converged}  cycles(stage2/FP64)={res["cycles"]} stage1={res["cycles_stage1"]}  '
           f'ngrids={res["ngrids"]} nlc_ngrids={res["nlc_ngrids"]}')
     print(f'SCF wall time: {t_scf:.2f} s   ({t_scf / max(res["cycles"], 1):.2f} s/cycle incl. setup)')
     print(f'{"stage":32s} {"total/s":>9s} {"calls":>6s} {"per-call/s":>11s}')

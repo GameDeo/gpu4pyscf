@@ -45,6 +45,12 @@ NLC_REMOVE_ZERO_RHO_GRID_THRESHOLD = 1e-10
 # Precision of the O(N^2) VV10 pair kernel: 'fp64' or 'fp32' (FP32 pair arithmetic,
 # compensated FP64 accumulation; see vv10.cu).
 VV10_PRECISION = getattr(__config__, 'vv10_precision', 'fp64')
+# Precision of the grid contractions (rho and the XC matrix build) in nr_rks, which are
+# GEMM-dominated and run in FP64 by default.  'fp32': AO values are cast to FP32 after the
+# FP64 AO kernel and all GEMMs run in FP32 (no FP64 pipe involved); 'tf32x3': same with the
+# GEMMs on tensor cores using 3xTF32 error-compensated emulation of FP32 (Ampere or newer).
+# Results carry ~1e-6 relative errors: intended for the early stage of a mixed-precision SCF.
+XC_PRECISION = getattr(__config__, 'xc_precision', 'fp64')
 
 # Should we release the cupy cache?
 FREE_CUPY_CACHE = False
@@ -432,6 +438,67 @@ def gen_grid_range(ngrids, device_id, blksize=MIN_BLK_SIZE):
         grid_end = grid_start
     return grid_start, grid_end
 
+def _xc32_contract(pattern, a, b, out, beta=0.):
+    '''FP32 tensor contraction; 3xTF32 tensor-core emulation if XC_PRECISION == 'tf32x3'.'''
+    if XC_PRECISION == 'tf32x3':
+        from gpu4pyscf.lib import cutensor as cutensor_lib
+        return cutensor_lib.contraction(
+            pattern, a, b, 1.0, beta, out=out,
+            compute_desc=cutensor_lib.cutensor_backend.COMPUTE_DESC_3xTF32)
+    return contract(pattern, a, b, beta=beta, out=out)
+
+def _eval_rho2_fp32(ao, cpos, xctype):
+    '''FP32 version of _eval_rho2 (ao: [comp,nao,ng], cpos: [nao,nocc], both float32).
+    Returns the density variables as float32.'''
+    nmo = cpos.shape[1]
+    if xctype == 'LDA':
+        ng = ao.shape[-1]
+        c0 = cupy.empty((nmo, ng), dtype=np.float32)
+        _xc32_contract('ki,kg->ig', cpos, ao, c0)
+        return (c0 * c0).sum(axis=0)[None]
+    ng = ao.shape[-1]
+    nvar = 4 if xctype in ('GGA', 'NLC') else 5
+    rho = cupy.empty((nvar, ng), dtype=np.float32)
+    c0 = cupy.empty((nmo, ng), dtype=np.float32)
+    c1 = cupy.empty((nmo, ng), dtype=np.float32)
+    _xc32_contract('ki,kg->ig', cpos, ao[0], c0)
+    rho[0] = (c0 * c0).sum(axis=0)
+    if nvar == 5:
+        rho[4] = 0
+    for i in range(1, 4):
+        _xc32_contract('ki,kg->ig', cpos, ao[i], c1)
+        rho[i] = 2 * (c0 * c1).sum(axis=0)
+        if nvar == 5:
+            rho[4] += (c1 * c1).sum(axis=0)
+    if nvar == 5:
+        rho[4] *= .5
+    return rho
+
+def _vmat_block_fp32(ao, wv, xctype, out):
+    '''FP32 version of the per-block XC matrix build; ao [comp,nao,ng], wv [nvar,ng] (float32).
+    Returns the (unsymmetrized) FP32 block in `out`.'''
+    if xctype == 'LDA':
+        ao0 = ao if ao.ndim == 2 else ao[0]   # LDA AOs are stored as [nao, ng]
+        aow = ao0 * wv[0]
+        _xc32_contract('ig,jg->ij', ao0, aow, out)
+    elif xctype == 'GGA':
+        aow = cupy.empty(ao.shape[1:], dtype=np.float32)
+        _xc32_contract('nip,np->ip', ao[:4], wv[:4], aow)
+        _xc32_contract('ig,jg->ij', ao[0], aow, out)
+    elif xctype == 'MGGA':
+        # tau term: 1/2 <nabla i| w_tau |nabla j>, as one contraction over (x, g)
+        w_tau = .5 * wv[4]
+        tmp = cupy.empty(ao.shape[1:], dtype=np.float32)
+        for i in range(1, 4):
+            cupy.multiply(ao[i], w_tau, out=tmp)
+            _xc32_contract('ig,jg->ij', ao[i], tmp, out, beta=0. if i == 1 else 1.)
+        aow = cupy.empty(ao.shape[1:], dtype=np.float32)
+        _xc32_contract('nip,np->ip', ao[:4], wv[:4], aow)
+        _xc32_contract('ig,jg->ij', ao[0], aow, out, beta=1.)
+    else:
+        raise NotImplementedError(f'FP32 XC for {xctype}')
+    return out
+
 def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                  verbose=None, with_lapl=False, device_id=0, hermi=1):
     ''' nr_rks task on given device
@@ -480,6 +547,9 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
             mo_buf = cupy.empty(nao*nocc)
             buf = cupy.empty(MIN_BLK_SIZE * max(2*nocc, nao))
 
+        # reduced-precision grid contractions (see XC_PRECISION); needs the MO-based rho path
+        fp32_xc = (XC_PRECISION in ('fp32', 'tf32x3') and mo_coeff is not None
+                   and xctype in ('LDA', 'GGA', 'MGGA'))
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(
                 _sorted_mol, grids, nao, ao_deriv, max_memory=None,
@@ -497,7 +567,11 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
                 assert hermi == 1
                 cpos = mo_buf[:nao_sub*nocc].reshape(nao_sub,nocc)
                 cpos = cupy.take(mo_coeff, idx, axis=0, out=cpos)
-                rho_tot[:,p0:p1] = _eval_rho2(ao_mask, cpos, xctype, with_lapl, buf=buf)
+                if fp32_xc:
+                    rho_tot[:,p0:p1] = _eval_rho2_fp32(
+                        ao_mask.astype(np.float32), cpos.astype(np.float32), xctype)
+                else:
+                    rho_tot[:,p0:p1] = _eval_rho2(ao_mask, cpos, xctype, with_lapl, buf=buf)
         t0 = log.timer_debug1(f'eval rho on Device {device_id}', *t0)
         dm_mask_buf = mo_buf = mo_coeff = None
 
@@ -522,12 +596,21 @@ def _nr_rks_task(ni, mol, grids, xc_code, dm, mo_coeff, mo_occ,
 
         vtmp_buf = cupy.empty(nao*nao)
         vmat = cupy.zeros((nao, nao))
+        if fp32_xc:
+            wv32 = wv.astype(np.float32)
+            vtmp32_buf = cupy.zeros(nao*nao, dtype=np.float32)
         p0 = p1 = 0
         for ao_mask, idx, weight, _ in ni.block_loop(
                 _sorted_mol, grids, nao, ao_deriv, max_memory=None,
                 grid_range=(grid_start, grid_end)):
             p1 = p0 + weight.size
             nao_sub = len(idx)
+            if fp32_xc:
+                vtmp32 = cupy.ndarray((nao_sub, nao_sub), dtype=np.float32, memptr=vtmp32_buf.data)
+                _vmat_block_fp32(ao_mask.astype(np.float32), wv32[:,p0:p1], xctype, vtmp32)
+                add_sparse(vmat, vtmp32.astype(np.float64), idx)
+                p0 = p1
+                continue
             vtmp = cupy.ndarray((nao_sub, nao_sub), memptr=vtmp_buf.data)
             if xctype == 'LDA':
                 aow = _scale_ao(ao_mask, wv[0,p0:p1], out=buf)
