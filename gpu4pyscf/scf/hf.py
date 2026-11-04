@@ -409,12 +409,17 @@ def scf(mf, dm0=None, **kwargs):
         mf._accept_converged_init = True
 
     if mf.max_cycle > 0 or mf.mo_coeff is None:
+        import contextlib
+        stage_ctx = contextlib.nullcontext()
+        if getattr(mf, 'mixed_precision', False) and mf.max_cycle > 0:
+            stage_ctx = mixed_precision.final_stage(mf)
         try:
-            mf.converged, mf.e_tot, \
-                    mf.mo_energy, mf.mo_coeff, mf.mo_occ = \
-                    _kernel(mf, mf.conv_tol, conv_tol_grad,
-                            dm0=dm0, callback=mf.callback,
-                            conv_check=mf.conv_check, **kwargs)
+            with stage_ctx:
+                mf.converged, mf.e_tot, \
+                        mf.mo_energy, mf.mo_coeff, mf.mo_occ = \
+                        _kernel(mf, mf.conv_tol, conv_tol_grad,
+                                dm0=dm0, callback=mf.callback,
+                                conv_check=mf.conv_check, **kwargs)
         finally:
             mf._accept_converged_init = False
     else:

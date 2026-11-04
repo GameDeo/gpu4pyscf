@@ -31,6 +31,7 @@ Enable with::
     mf.mixed_precision = True            # or a dict of options, see DEFAULTS
 '''
 import contextlib
+import copy
 import cupy
 from gpu4pyscf.lib import logger
 from gpu4pyscf.lib.cupy_helper import tag_array
@@ -47,7 +48,27 @@ def _default_gemm_precision():
         return 'fp32'
 
 
+def _int8_scheme_default():
+    '''GPUs with weak FP64 but INT8 tensor cores (Turing T4, and the sm_86/sm_89 consumer / L-series / A10 parts) run
+    the FP64-class parts of the Fock build as INT8 residue (CRT) GEMMs; GPUs with strong FP64 (sm_80, sm_90, ...)
+    keep the FP64 / FP32 staged scheme.'''
+    try:
+        cc = int(cupy.cuda.Device().compute_capability)
+        return 'crt' if cc in (75, 86, 87, 89) else 'classic'
+    except Exception:
+        return 'classic'
+
+
 DEFAULTS = {
+    # 'crt': coarse-grid CRT stage, then CRT (INT8-emulated FP64-class) full-grid SCF; 'classic': coarse grid (optional),
+    # FP32 stage 1 / 1b and an FP64 final stage; 'auto' picks by GPU generation.
+    'scheme': 'auto',
+    'coarse_grid': (50, 194),     # atom grid of the first SCF stage (None: full grid from the start)
+    'coarse_conv_tol_grad': 1e-3,
+    'coarse_conv_tol': 1e-2,
+    'crt_moduli_coarse': 8,       # INT8 moduli (K and XC) in the coarse stage: ~1e-6 relative accuracy
+    'crt_moduli_final': 11,       # ... in the final stage: ~3e-10
+    'final_vv10': 'fp32',         # VV10 precision in the final stage of the 'crt' scheme (FP32 error ~1e-9 in E)
     'k_precision': None,          # DF-K GEMMs: 'fp32' | 'tf32x3'; None -> auto by GPU generation
     'xc_precision': None,         # XC grid GEMMs (rho, vmat): same choices
     'vv10_precision': 'fp32',
@@ -68,9 +89,17 @@ def get_options(mf):
     cfg = getattr(mf, 'mixed_precision', None)
     if isinstance(cfg, dict):
         opt.update(cfg)
-    for key in ('k_precision', 'xc_precision'):
-        if opt[key] is None:
-            opt[key] = _default_gemm_precision()
+    if opt['scheme'] == 'auto':
+        opt['scheme'] = _int8_scheme_default()
+    if opt['scheme'] == 'crt':
+        # reduced precision of the coarse stage = few moduli; there is no separate FP32 stage
+        for key in ('k_precision', 'xc_precision'):
+            opt[key] = 'crt'
+        opt['k_moduli'] = opt['xc_moduli'] = opt['crt_moduli_coarse']
+    else:
+        for key in ('k_precision', 'xc_precision'):
+            if opt[key] is None:
+                opt[key] = _default_gemm_precision()
     return opt
 
 
@@ -79,14 +108,42 @@ def fast_precision(opt):
     '''Temporarily switch the reduced-precision kernels on.'''
     from gpu4pyscf.dft import numint
     from gpu4pyscf.df import df_jk
-    old = (numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION)
+    old = (numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION, df_jk.K_CRT_MODULI, numint.XC_CRT_MODULI)
     numint.VV10_PRECISION = opt['vv10_precision']
     df_jk.K_PRECISION = opt['k_precision']
     numint.XC_PRECISION = opt['xc_precision']
+    if opt.get('k_moduli'):
+        df_jk.K_CRT_MODULI = opt['k_moduli']
+    if opt.get('xc_moduli'):
+        numint.XC_CRT_MODULI = opt['xc_moduli']
     try:
         yield
     finally:
-        numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION = old
+        (numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION,
+         df_jk.K_CRT_MODULI, numint.XC_CRT_MODULI) = old
+
+
+def final_stage(mf):
+    '''Context manager for the final (convergence-defining) SCF stage: the CRT scheme runs it with INT8-emulated
+    FP64-class GEMMs (crt_moduli_final moduli); the classic scheme leaves it in plain FP64.'''
+    opt = get_options(mf)
+    if opt['scheme'] != 'crt':
+        return contextlib.nullcontext()
+    return fast_precision(dict(opt, vv10_precision=opt['final_vv10'],
+                               k_moduli=opt['crt_moduli_final'], xc_moduli=opt['crt_moduli_final']))
+
+
+@contextlib.contextmanager
+def _coarse_grids(mf, grid):
+    full = mf.grids
+    g = copy.copy(full)
+    g.reset()
+    g.atom_grid = tuple(grid)
+    mf.grids = g
+    try:
+        yield
+    finally:
+        mf.grids = full
 
 
 class _Plateau(Exception):
@@ -138,6 +195,24 @@ def run_fast_stage(mf, dm0, **kwargs):
     '''
     log = logger.new_logger(mf)
     opt = get_options(mf)
+    coarse = opt['coarse_grid'] if hasattr(mf, 'grids') else None
+    if coarse is not None:
+        with _coarse_grids(mf, coarse), fast_precision(opt):
+            log.info('Mixed precision SCF, coarse stage: grid=%s K=%s XC=%s (moduli %s) VV10=%s conv_tol_grad=%g',
+                     coarse, opt['k_precision'], opt['xc_precision'], opt.get('xc_moduli'),
+                     opt['vv10_precision'], opt['coarse_conv_tol_grad'])
+            conv, e_tot, mo_energy, mo_coeff, mo_occ = _run_stage(
+                mf, dm0, opt['coarse_conv_tol'], opt['coarse_conv_tol_grad'],
+                min(mf.max_cycle, opt['max_cycle']), **kwargs)
+        mf.cycles_coarse = getattr(mf, 'cycles', -1)
+        log.info('Mixed precision SCF, coarse stage done: E=%.12g converged=%s cycles=%s',
+                 e_tot, conv, mf.cycles_coarse)
+        dm0 = tag_array(mf.make_rdm1(mo_coeff, mo_occ), mo_coeff=mo_coeff, mo_occ=mo_occ)
+        if opt['scheme'] == 'crt':
+            mf.cycles_stage1 = mf.cycles_stage1b = 0
+            return dm0
+    elif opt['scheme'] == 'crt':
+        return dm0
     with fast_precision(opt):
         log.info('Mixed precision SCF, stage 1: K=%s XC=%s VV10=%s conv_tol_grad=%g',
                  opt['k_precision'], opt['xc_precision'], opt['vv10_precision'], opt['conv_tol_grad'])
