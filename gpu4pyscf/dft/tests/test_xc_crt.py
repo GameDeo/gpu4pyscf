@@ -109,6 +109,25 @@ class KnownValues(unittest.TestCase):
         print(f'[K crt] max|dK| {err:.2e}')
         self.assertLess(err, 1e-9)
 
+    def test_cderi(self):
+        '''DF tensor from the INT8-emulated aux-metric transform vs FP64'''
+        from gpu4pyscf.df import df
+        mf2 = dft.RKS(mol, xc='pbe').density_fit()
+        ref = mf2.with_df
+        ref.build()
+        c0 = cupy.asarray(ref._cderi[0])
+        old = df.CDERI_PRECISION
+        df.CDERI_PRECISION = 'crt'
+        try:
+            mf3 = dft.RKS(mol, xc='pbe').density_fit()
+            mf3.with_df.build()
+        finally:
+            df.CDERI_PRECISION = old
+        c1 = cupy.asarray(mf3.with_df._cderi[0])
+        err = float(cupy.abs(c1 - c0).max() / cupy.abs(c0).max())
+        print(f'[cderi crt] max rel err {err:.2e}')
+        self.assertLess(err, 1e-11)
+
     def _check(self, xc, nmod, tol):
         dm = mf.make_rdm1()
         n0, e0, v0 = mf._numint.nr_rks(mol, mf.grids, xc, dm)

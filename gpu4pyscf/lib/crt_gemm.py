@@ -233,7 +233,7 @@ class PlanesT:
     The memory-layout transposition (d1 contiguous in src -> d2 contiguous in the planes) happens in the quantize
     kernel via shared-memory tiles, so e.g. the DF tensor [i, j, L] (L contiguous) feeds the TN INT8 GEMM directly.'''
 
-    def __init__(self, src, nmod, q):
+    def __init__(self, src, nmod, q, compact=False):
         d0, d1, d2 = src.shape
         isz = src.itemsize
         assert src.dtype == cupy.float64 and src.strides[1] == isz
@@ -250,6 +250,9 @@ class PlanesT:
         ex = e
         self.rows, self.rp, self.kp = d0 * P1, d0 * P1, P2
         self.e = cupy.tile(ex, d0)                         # exponent of row (i, l)
+        if compact:                                        # d0 == 1: no zero-padded rows in the result
+            assert d0 == 1
+            self.rows = d1
         planes = cupy.empty((nmod, d0, P1, P2), dtype=cupy.int8)
         _get('t', nmod, q > 30)(((P2 + 31) // 32, (P1 + 31) // 32, d0), (32, 8),
                                 (src, ex, planes, np.int32(d0), np.int32(d1), np.int32(d2), np.int64(s0), np.int64(s2),
@@ -293,9 +296,9 @@ def matmul_operands(oa, ob, out, accumulate=False):
     C = cupy.empty((n, oa.rp, ob.rp), dtype=cupy.int32)
     int8_mm_nt_batched(oa.planes, ob.planes, C)
     ea = cupy.zeros(oa.rp, dtype=cupy.int32)
-    ea[:oa.rows] = oa.e
+    ea[:oa.rows] = oa.e[:oa.rows]
     eb = cupy.zeros(ob.rp, dtype=cupy.int32)
-    eb[:ob.rows] = ob.e
+    eb[:ob.rows] = ob.e[:ob.rows]
     tot = oa.rows * ob.rows
     thr = 256
     _get('r', n)(((tot + thr - 1) // thr,), (thr,),
@@ -343,3 +346,29 @@ def gemm_planes(src3, bt, nmod, out=None, qmax=QMAX):
         out = cupy.empty((oa.rows, ob.rows), dtype=cupy.float64)
     matmul_operands(oa, ob, out)
     return out, _pad16(d1)
+
+
+def gemm_dense(a, b, nmod, out=None, qmax=QMAX, budget=1.0e9):
+    '''out (m, n) float64 = a (m, K) @ b (K, n) from INT8 residue GEMMs.  The rows of `a` are processed in chunks
+    that keep the residue planes under `budget` bytes; the planes of `b` (static for the whole call) are built once.'''
+    m, K = a.shape
+    n = b.shape[1]
+    assert K <= MAX_K
+    if out is None:
+        out = cupy.empty((m, n), dtype=cupy.float64)
+    if not a.flags.c_contiguous:
+        a = cupy.ascontiguousarray(a)
+    q = plan(K, nmod, qmax)
+    isz = b.itemsize
+    if b.strides[1] == isz:                                   # C order [K][n]: transposing quantization
+        view = cupy.lib.stride_tricks.as_strided(b, shape=(1, n, K), strides=(0, isz, b.strides[0]))
+        ob = PlanesT(view, nmod, q, compact=True)
+    else:                                                     # F order: b.T is C-contiguous [n][K]
+        ob = Operand(cupy.ascontiguousarray(b.T)[None], nmod, q)
+    kp = _pad16(K)
+    rc = max(16, int(budget // (nmod * kp)) // 16 * 16)
+    for r0 in range(0, m, rc):
+        r1 = min(m, r0 + rc)
+        oa = Operand(a[r0:r1][None], nmod, q)
+        matmul_operands(oa, ob, out[r0:r1])
+    return out

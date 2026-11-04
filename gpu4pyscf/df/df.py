@@ -573,6 +573,17 @@ def _cderi_task(intopt, cd_low, task_list, _cderi, aux_blksize,
             t1 = log.timer_debug1(f'transfer data for {cp_ij_id} / {nq} on Device {device_id}', *t1)
     return
 
+# Precision of the aux-metric transform j3c @ L^-T of the DF tensor build (the one big FP64 GEMM of the build):
+# 'fp64' or 'crt' (INT8 residue GEMMs with CDERI_CRT_MODULI moduli, ~1e-12 relative; see gpu4pyscf.lib.crt_gemm).
+CDERI_PRECISION = 'fp64'
+CDERI_CRT_MODULI = 14
+
+def _j3c_dot(j3c, c, out):
+    if CDERI_PRECISION == 'crt' and j3c.dtype == np.float64 and c.dtype == np.float64:
+        from gpu4pyscf.lib import crt_gemm
+        return crt_gemm.gemm_dense(j3c, c, CDERI_CRT_MODULI, out=out)
+    return j3c.dot(c, out=out)
+
 def _cholesky_eri(intopt, *, omega=None, lr_factor=None, sr_factor=None,
                   use_gpu_memory=None):
     assert isinstance(intopt, int3c2e_bdiv.Int3c2eOpt)
@@ -674,7 +685,7 @@ def _cholesky_eri(intopt, *, omega=None, lr_factor=None, sr_factor=None,
                 log.debug1('processing cderi batch %d', batch_id)
                 j3c = _eval_j3c(shl_pair_batch_id=batch_id, out=work)
                 cderi_gpu = ndarray((j3c.shape[0], naux), buffer=work2)
-                cderi_gpu = j3c.dot(c, out=cderi_gpu)
+                cderi_gpu = _j3c_dot(j3c, c, cderi_gpu)
                 if needs_recontraction:
                     cderi_gpu = recontract(batch_id, cderi_gpu, out=work1)
 
@@ -720,10 +731,10 @@ def _cholesky_eri(intopt, *, omega=None, lr_factor=None, sr_factor=None,
                 p0, p1 = cderi_offsets[batch_id:batch_id+2]
                 if needs_recontraction:
                     tmp = ndarray((j3c.shape[0], aux1-aux0), buffer=work1)
-                    tmp = j3c.dot(c, out=tmp)
+                    tmp = _j3c_dot(j3c, c, tmp)
                     recontract(batch_id, tmp, out=out[p0:p1])
                 else:
-                    j3c.dot(c, out=out[p0:p1])
+                    _j3c_dot(j3c, c, out[p0:p1])
             return out.T
 
         cderi = multi_gpu.run(proc, non_blocking=True)

@@ -22,7 +22,7 @@ def main():
     mf = dft.RKS(mol, xc='wb97m-v').density_fit()
     mf.grids.atom_grid = (99, 590)
     mf.nlcgrids.atom_grid = (50, 194)
-    mf.mixed_precision = {'k_precision': 'fp32', 'xc_precision': 'fp32'}
+    mf.mixed_precision = {'scheme': 'crt'}
     mf.conv_tol = 1e-9
     mf.kernel()
     g = mf.nuc_grad_method()

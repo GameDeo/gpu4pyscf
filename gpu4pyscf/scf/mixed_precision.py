@@ -68,6 +68,7 @@ DEFAULTS = {
     'coarse_conv_tol': 1e-2,
     'crt_moduli_coarse': 8,       # INT8 moduli (K and XC) in the coarse stage: ~1e-6 relative accuracy
     'crt_moduli_final': 11,       # ... in the final stage: ~3e-10
+    'crt_moduli_cderi': 14,       # DF-tensor build GEMM (aux-metric transform): static, so always accurate (~1e-12)
     'final_vv10': 'fp32',         # VV10 precision in the final stage of the 'crt' scheme (FP32 error ~1e-9 in E)
     'k_precision': None,          # DF-K GEMMs: 'fp32' | 'tf32x3'; None -> auto by GPU generation
     'xc_precision': None,         # XC grid GEMMs (rho, vmat): same choices
@@ -96,6 +97,7 @@ def get_options(mf):
         for key in ('k_precision', 'xc_precision'):
             opt[key] = 'crt'
         opt['k_moduli'] = opt['xc_moduli'] = opt['crt_moduli_coarse']
+        opt['cderi_precision'], opt['cderi_moduli'] = 'crt', opt['crt_moduli_cderi']
     else:
         for key in ('k_precision', 'xc_precision'):
             if opt[key] is None:
@@ -107,8 +109,13 @@ def get_options(mf):
 def fast_precision(opt):
     '''Temporarily switch the reduced-precision kernels on.'''
     from gpu4pyscf.dft import numint
-    from gpu4pyscf.df import df_jk
-    old = (numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION, df_jk.K_CRT_MODULI, numint.XC_CRT_MODULI)
+    from gpu4pyscf.df import df_jk, df
+    old = (numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION, df_jk.K_CRT_MODULI, numint.XC_CRT_MODULI,
+           df.CDERI_PRECISION, df.CDERI_CRT_MODULI)
+    if opt.get('cderi_precision'):
+        df.CDERI_PRECISION = opt['cderi_precision']
+    if opt.get('cderi_moduli'):
+        df.CDERI_CRT_MODULI = opt['cderi_moduli']
     numint.VV10_PRECISION = opt['vv10_precision']
     df_jk.K_PRECISION = opt['k_precision']
     numint.XC_PRECISION = opt['xc_precision']
@@ -120,7 +127,7 @@ def fast_precision(opt):
         yield
     finally:
         (numint.VV10_PRECISION, df_jk.K_PRECISION, numint.XC_PRECISION,
-         df_jk.K_CRT_MODULI, numint.XC_CRT_MODULI) = old
+         df_jk.K_CRT_MODULI, numint.XC_CRT_MODULI, df.CDERI_PRECISION, df.CDERI_CRT_MODULI) = old
 
 
 def final_stage(mf):
