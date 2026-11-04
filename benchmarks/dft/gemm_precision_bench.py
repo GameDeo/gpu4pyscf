@@ -127,6 +127,7 @@ EMUL_BITS = ()
 FP32_VARIANTS = True
 GM8_MODULI = ()
 _GM8 = None
+OZAKI_S = ()
 
 
 def gm8_matmul(a, b, num_moduli, fastmode=1):
@@ -185,6 +186,16 @@ def run_case(name, a64, b64, kcs=(0, 1024, 256, 64), reps=7):
     t64 = bench(lambda: cupy.matmul(a64, b64), reps)
     ref64 = cupy.matmul(a64, b64)
     rows.append(('fp64 native', t64, (0.0, 0.0)))
+    if OZAKI_S:
+        import ozaki_int8
+        smax = max(OZAKI_S)
+        t_sl = bench(lambda: (ozaki_int8.Sliced(a64, smax, 'A'), ozaki_int8.Sliced(b64, smax, 'B')), 3)
+        sa, sb = ozaki_int8.Sliced(a64, smax, 'A'), ozaki_int8.Sliced(b64, smax, 'B')
+        for S in OZAKI_S:
+            t = bench(lambda: ozaki_int8.matmul_sliced(sa, sb, S), reps)
+            rows.append((f'Ozaki-I INT8 S={S} ({7 * S}b) gemm-only', t,
+                         err_stats(ozaki_int8.matmul_sliced(sa, sb, S), ref64)))
+        rows.append((f'  (slicing both operands S={smax}: {t_sl * 1e3:.2f} ms, once)', float('nan'), (0.0, 0.0)))
     for nm in GM8_MODULI:
         t = bench(lambda: gm8_matmul(a64, b64, nm), reps)
         rows.append((f'GEMMul8 INT8 {nm} moduli', t, err_stats(gm8_matmul(a64, b64, nm), ref64)))
@@ -211,10 +222,12 @@ def main():
     p.add_argument('--save', default=None, help='np.savez the captured XC operands here')
     p.add_argument('--emul', type=int, nargs='*', default=[], help='cuBLAS fixed-point emulation mantissa bit counts to test')
     p.add_argument('--no_fp32', action='store_true', help='skip the FP32/TF32 variants')
+    p.add_argument('--ozaki', type=int, nargs='*', default=[], help='Ozaki-I INT8 slice counts to test (own implementation)')
     p.add_argument('--gm8', type=int, nargs='*', default=[], help='GEMMul8 moduli counts to test')
     p.add_argument('--gm8_lib', default='/content/gm8/libgm8shim.so')
     args = p.parse_args()
-    global EMUL_BITS, FP32_VARIANTS, GM8_MODULI, _GM8
+    global EMUL_BITS, FP32_VARIANTS, GM8_MODULI, _GM8, OZAKI_S
+    OZAKI_S = tuple(args.ozaki)
     GM8_MODULI = tuple(args.gm8)
     if GM8_MODULI:
         import ctypes

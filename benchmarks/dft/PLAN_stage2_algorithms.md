@@ -37,3 +37,15 @@ Compute is spent sparingly: micro-benchmarks first (minutes on one GPU), SCF run
 * On A100/H100 FP64 tensor cores make plain FP32 *not* faster; only TF32/INT8 paths can win there (E1, E4).
 * On T4/L4/RTX the FP64 stage is the bottleneck of the current staged scheme (about 60 % of its time), so E2 and E4 matter most there.
 * Gradients: staged mixed run gave 1.2e-6 vs 3.4e-7 for FP64 at default tolerance (reference conv_tol 1e-11); final-stage tolerance must be tightened or the polish extended.
+
+
+## Status after the first A100/T4 experiment round
+
+| id | result |
+|---|---|
+| E1 | cuTENSOR 3xTF32 is not a tensor-core path (== FP32 SIMT). Hand-split 3xTF32 confirms in-TC RZ accumulation is the accuracy limiter; needs a fused kernel. Open. |
+| E2 | NO-GO as FP64-polish replacement (K error cut only 4-5x; Vxc error is uncorrelated rounding noise). |
+| E3 | Approximation (dE 7e-7..1e-6 Eh), halves K time and 1/3 of DF memory. Opt-in only. |
+| E4 | cuBLAS emulation: slower than native on A100, silent no-op on T4. Own Ozaki-I INT8: 4-7x over native FP64 on T4 at 42-56 bits for big-K GEMMs. Needs fused slicing kernel + integration. **Highest-value next step.** |
+| gradient | final_grad_factor 0.1 gives gradients ~5x closer to a tight reference than plain FP64 at default tolerance. |
+| denied | Cloning/building third-party GEMMul8 on the runtime was refused by the permission classifier; own implementation used instead. |
