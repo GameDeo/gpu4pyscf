@@ -109,7 +109,8 @@ def _quant3t_src(n, wide):
     body = [_resid_code(i, p, wide, f'out[(size_t){i} * plane + base]') for i, p in enumerate(ALL_MODULI[:n])]
     return r'''
 extern "C" __global__ void quant3t(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
-                                   int d0, int d1, int d2, long long s0, long long s2, int P1, int P2, int q, size_t plane)
+                                   int d0, int d1, int d2, long long s0, long long s2, int P1, int P2, int q, size_t plane,
+                                   int slab_stride)
 {
     __shared__ ''' + T + r''' tile[32][33];
     int i = blockIdx.z;
@@ -118,7 +119,7 @@ extern "C" __global__ void quant3t(const double* __restrict__ a, const int* __re
         int c1 = c1b + threadIdx.x, c2 = c2b + threadIdx.y + 8 * t;
         ''' + T + r''' x = 0;
         if (c1 < d1 && c2 < d2) {
-            double v = ldexp(a[(long long)i * s0 + c1 + (long long)c2 * s2], q - ex[c1]);
+            double v = ldexp(a[(long long)i * s0 + c1 + (long long)c2 * s2], q - ex[(long long)i * slab_stride + c1]);
             x = (''' + T + r''')llrint(v);
         }
         tile[threadIdx.y + 8 * t][threadIdx.x] = x;
@@ -138,14 +139,14 @@ extern "C" __global__ void quant3t(const double* __restrict__ a, const int* __re
 
 _COLMAX_SRC = r'''
 extern "C" __global__ void colmax(const double* __restrict__ a, unsigned long long* __restrict__ mx,
-                                  int d1, int d2, long long s0, long long s2)
+                                  int d1, int d2, long long s0, long long s2, int slab_stride)
 {
     int c1 = blockIdx.x * blockDim.x + threadIdx.x;
     if (c1 >= d1) return;
     const double* p = a + (long long)blockIdx.y * s0 + c1;
     double m = 0.;
     for (int c2 = 0; c2 < d2; c2++) m = fmax(m, fabs(p[(long long)c2 * s2]));
-    atomicMax(mx + c1, (unsigned long long)__double_as_longlong(m));
+    atomicMax(mx + (long long)blockIdx.y * slab_stride + c1, (unsigned long long)__double_as_longlong(m));
 }
 '''
 
@@ -250,30 +251,32 @@ class PlanesT:
     The memory-layout transposition (d1 contiguous in src -> d2 contiguous in the planes) happens in the quantize
     kernel via shared-memory tiles, so e.g. the DF tensor [i, j, L] (L contiguous) feeds the TN INT8 GEMM directly.'''
 
-    def __init__(self, src, nmod, q, compact=False):
+    def __init__(self, src, nmod, q, compact=False, per_slab=False):
+        '''per_slab: every (i, l) row gets its own exponent (max over d2 only) instead of sharing it over i.'''
         d0, d1, d2 = src.shape
         isz = src.itemsize
         assert src.dtype == cupy.float64 and src.strides[1] == isz
         s0, s2 = src.strides[0] // isz, src.strides[2] // isz
         self.nmod, self.q = nmod, q
         P1, P2 = _pad16(d1), _pad16(d2)
-        mx = cupy.zeros(P1, dtype=cupy.uint64)
+        nslab = d0 if per_slab else 1
+        sstride = P1 if per_slab else 0
+        mx = cupy.zeros(nslab * P1, dtype=cupy.uint64)
         thr = 128
         _get('cm', 0)(((d1 + thr - 1) // thr, d0), (thr,),
-                      (src, mx, np.int32(d1), np.int32(d2), np.int64(s0), np.int64(s2)))
+                      (src, mx, np.int32(d1), np.int32(d2), np.int64(s0), np.int64(s2), np.int32(sstride)))
         amax = mx.view(cupy.float64)
         _, e = cupy.frexp(amax)
-        e = cupy.where(amax == 0, 0, e).astype(cupy.int32)
-        ex = e
+        ex = cupy.where(amax == 0, 0, e).astype(cupy.int32)
         self.rows, self.rp, self.kp = d0 * P1, d0 * P1, P2
-        self.e = cupy.tile(ex, d0)                         # exponent of row (i, l)
+        self.e = ex if per_slab else cupy.tile(ex, d0)       # exponent of row (i, l)
         if compact:                                        # d0 == 1: no zero-padded rows in the result
             assert d0 == 1
             self.rows = d1
         planes = cupy.empty((nmod, d0, P1, P2), dtype=cupy.int8)
         _get('t', nmod, q > 30)(((P2 + 31) // 32, (P1 + 31) // 32, d0), (32, 8),
                                 (src, ex, planes, np.int32(d0), np.int32(d1), np.int32(d2), np.int64(s0), np.int64(s2),
-                                 np.int32(P1), np.int32(P2), np.int32(q), np.uint64(d0 * P1 * P2)))
+                                 np.int32(P1), np.int32(P2), np.int32(q), np.uint64(d0 * P1 * P2), np.int32(sstride)))
         self.planes = planes.reshape(nmod, d0 * P1, P2)
 
 

@@ -365,6 +365,39 @@ class FastEig:
         return lam, X @ V
 
 
+def _proj_grad(X, Co, Sinv, s1e):
+    '''2 |C_v^T X| for the orthonormal complement of the S-orthonormal Co (no virtual orbitals needed):
+    R = X - S Co (Co^T X) is the complement part of X (formed first, so no cancellation between two large traces),
+    |C_v^T X|^2 = tr(R^T S^-1 R).'''
+    R = X - s1e @ (Co @ (Co.T @ X))
+    return 2 * np.sqrt(max(float(cupy.einsum('ia,ia->', R, Sinv @ R)), 0.0))
+
+
+def _rotate(fd, C, e, s1e, nocc, steps):
+    '''Occupied-subspace update without diagonalisation: canonicalise in the occupied block, first-order rotation
+    into the S-projected reference virtuals (preconditioner: reference orbital energies), Loewdin.'''
+    Co, Cv0, ev = C[:, :nocc], C[:, nocc:], e[nocc:]
+    SCv0 = s1e @ Cv0
+    for _ in range(steps):
+        G = fd @ Co
+        eo, U = cupy.linalg.eigh(0.5 * (Co.T @ G + G.T @ Co))
+        Co = Co @ U
+        G = G @ U
+        Cv = Cv0 - Co @ (Co.T @ SCv0)
+        kappa = (Cv.T @ G) / (eo[None, :] - ev[:, None])
+        Co = Co + Cv @ kappa
+        w, V = cupy.linalg.eigh(Co.T @ s1e @ Co)
+        Co = Co @ ((V / cupy.sqrt(w)) @ V.T)
+    G = fd @ Co
+    eo, U = cupy.linalg.eigh(0.5 * (Co.T @ G + G.T @ Co))
+    Co = Co @ U
+    Cn = C.copy()
+    Cn[:, :nocc] = Co
+    en = e.copy()
+    en[:nocc] = eo
+    return en, Cn
+
+
 # ------------------------------------------------------------------ driver
 def _grid(mol, atom_grid, like=None):
     from gpu4pyscf.dft import gen_grid
@@ -450,8 +483,9 @@ def kernel(mf, dm0=None, **kwargs):
                 dk_lr = DirectDFK(mol, mf.with_df.auxmol, omega, nmod_t=nm[0], nmod_x=nm[1])
         g_cheap = g_nlc_cheap = None
         if opt['schedule']:
-            g_cheap = _grid(mol, opt['cheap_grid'], mf.grids)
-            g_nlc_cheap = _grid(mol, opt['cheap_nlc_grid'], mf.nlcgrids) if with_nlc else None
+            g_cheap = _grid(mol, opt['cheap_grid'], mf.grids) if opt['cheap_grid'] else mf.grids
+            g_nlc_cheap = (_grid(mol, opt['cheap_nlc_grid'], mf.nlcgrids) if opt['cheap_nlc_grid'] else mf.nlcgrids) \
+                if with_nlc else None
         h1e = cupy.asarray(mf.get_hcore())
         s1e = cupy.asarray(mf.get_ovlp())
         e_nuc = mf.energy_nuc()
@@ -475,33 +509,10 @@ def kernel(mf, dm0=None, **kwargs):
     Sinv = eig.X @ eig.X.T if opt['inner_eig'] == 'rotate' else None
 
     def proj_grad(X_, Co_):
-        '''2 |C_v^T X| for the orthonormal complement of the S-orthonormal Co_ (no virtual orbitals needed)'''
-        t = float(cupy.einsum('ia,ia->', X_, Sinv @ X_)) - float(cupy.linalg.norm(Co_.T @ X_)) ** 2
-        return 2 * np.sqrt(max(t, 0.0))
+        return _proj_grad(X_, Co_, Sinv, s1e)
 
     def rotate(fd, C, e):
-        '''occupied-subspace update without diagonalisation: canonicalise in the occupied block, first-order
-        rotation into the S-projected reference virtuals (preconditioner: reference orbital energies), Loewdin.'''
-        Co_, Cv0, ev = C[:, :nocc], C[:, nocc:], e[nocc:]
-        SCv0 = s1e @ Cv0
-        for _ in range(opt['rotate_steps']):
-            G = fd @ Co_
-            eo_, U = cupy.linalg.eigh(0.5 * (Co_.T @ G + G.T @ Co_))
-            Co_ = Co_ @ U
-            G = G @ U
-            Cv = Cv0 - Co_ @ (Co_.T @ SCv0)
-            kappa = (Cv.T @ G) / (eo_[None, :] - ev[:, None])
-            Co_ = Co_ + Cv @ kappa
-            w_, V_ = cupy.linalg.eigh(Co_.T @ s1e @ Co_)
-            Co_ = Co_ @ ((V_ / cupy.sqrt(w_)) @ V_.T)
-        G = fd @ Co_
-        eo_, U = cupy.linalg.eigh(0.5 * (Co_.T @ G + G.T @ Co_))
-        Co_ = Co_ @ U
-        Cn = C.copy()
-        Cn[:, :nocc] = Co_
-        en = e.copy()
-        en[:nocc] = eo_
-        return en, Cn
+        return _rotate(fd, C, e, s1e, nocc, opt['rotate_steps'])
 
     def orb_grad(f, C):
         if Sinv is not None:

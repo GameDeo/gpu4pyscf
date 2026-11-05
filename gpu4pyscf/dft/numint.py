@@ -556,14 +556,20 @@ def _half_transform(ao, cpos, xctype, crt):
         from gpu4pyscf.lib import crt_gemm
         ctT = cupy.ascontiguousarray(cpos.T)
         P1 = (ngrids + 15) // 16 * 16
-        c4 = cupy.empty((ncomp, P1, nocc))
-        for k in range(ncomp):
-            a = ao if ao.ndim == 2 else ao[k]
-            a = cupy.ascontiguousarray(a)
-            nk = a.shape[0]
-            view = cupy.lib.stride_tricks.as_strided(a, shape=(1, ngrids, nk), strides=(0, a.itemsize, ngrids * a.itemsize))
-            crt_gemm.gemm_planes(view, ctT, XC_CRT_MODULI, out=c4[k])
-        return c4
+        a3 = ao[None] if ao.ndim == 2 else ao
+        if not a3.flags.c_contiguous:
+            a3 = cupy.ascontiguousarray(a3)
+        nk = a3.shape[1]
+        # all components in one transposed quantisation and one INT8 GEMM; every (component, grid point) row keeps
+        # its own exponent (per_slab), so the precision is that of separate per-component products
+        view = cupy.lib.stride_tricks.as_strided(a3, shape=(ncomp, ngrids, nk),
+                                                 strides=(nk * ngrids * a3.itemsize, a3.itemsize, ngrids * a3.itemsize))
+        q = crt_gemm.plan(nk, XC_CRT_MODULI)
+        oa = crt_gemm.PlanesT(view, XC_CRT_MODULI, q, per_slab=True)
+        ob = crt_gemm.Operand(ctT[None], XC_CRT_MODULI, q)
+        c4 = cupy.empty((ncomp * P1, nocc))
+        crt_gemm.matmul_operands(oa, ob, c4)
+        return c4.reshape(ncomp, P1, nocc)
     c4 = cupy.empty((ncomp, ngrids, nocc))
     for k in range(ncomp):
         a = ao if ao.ndim == 2 else ao[k]

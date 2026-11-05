@@ -17,7 +17,7 @@ for v in variants[:1]:
     wm = dft.RKS(w, xc='wb97m-v').density_fit()
     wm.grids.atom_grid = (20, 50); wm.nlcgrids.atom_grid = (10, 26)
     wm.mixed_precision = {'scheme': 'crt'}
-    wm.multifidelity = dict(v)
+    wm.multifidelity = dict(v) or True
     wm.kernel()
     if do_grad:
         wm.nuc_grad_method().kernel()
@@ -28,7 +28,7 @@ for v in variants:
     mf.nlcgrids.atom_grid = (50, 194)
     mf.conv_tol = 1e-9
     mf.mixed_precision = {'scheme': 'crt'}
-    mf.multifidelity = dict(v)
+    mf.multifidelity = dict(v) or True
     cupy.cuda.Stream.null.synchronize()
     t0 = time.perf_counter()
     e = mf.kernel()
