@@ -297,8 +297,15 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
     tmp = None
 
     if fit_oo is not None:
-        dm_oo = cp.empty_like(fit_oo)
-        dm_oo[aux_sorting] = fit_oo
+        if isinstance(fit_oo, np.ndarray):
+            # host-resident fit (large molecules): permute on the host, one device copy
+            tmp = np.empty_like(fit_oo)
+            tmp[cp.asnumpy(aux_sorting)] = fit_oo
+            dm_oo = cp.asarray(tmp)
+            tmp = None
+        else:
+            dm_oo = cp.empty_like(fit_oo)
+            dm_oo[aux_sorting] = fit_oo
         aux_coeff = None
     else:
         j2c = int2c2e(auxmol, omega=omega, lr_factor=lr_factor, sr_factor=sr_factor)

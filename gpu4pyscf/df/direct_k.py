@@ -191,7 +191,12 @@ class DirectDFK:
         '''Fitting coefficients R[k, i, j] = (J^-1 (P|ij))_k of the last kc_j(keep_fit=True) call, in the native aux order
         used by df.grad.rhf.FIT_OO_CACHE (precompute_fit_oo); U rotates the occupied orbitals (C -> C U).'''
         Z, C = self._fit
-        R = cp.asarray(Z)[self._setup['aux_sorting']]
+        # host array (naux * nocc^2 is GBs for large molecules); rotated in aux chunks on the GPU
+        R = Z[cp.asnumpy(self._setup['aux_sorting'])]
         if U is not None:
-            R = cp.einsum('ki,rkl,lj->rij', U, R, U)
+            U = cp.asarray(U)
+            cb = max(1, int(2.5e8 / (8 * R.shape[1] * R.shape[2])))
+            for c0 in range(0, R.shape[0], cb):
+                Rc = cp.asarray(R[c0:c0 + cb])
+                R[c0:c0 + cb] = cp.matmul(cp.matmul(U.T, Rc), U).get()
         return R
