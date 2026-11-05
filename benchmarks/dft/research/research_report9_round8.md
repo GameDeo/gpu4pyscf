@@ -30,8 +30,10 @@ Date 2026-11-05.
      from 2.3e-4 to 6.2e-6.
    - The 10 % tier adds 1.6e-7 and is now the default. The BPA gradient drops from 5.55 s to 4.55 s, unchanged
      accuracy vs the tight reference (4.8e-7).
-4. **BPA now (T4, profiled run):** SCF 14.6 s + gradient 4.7 s = 19.3 s, dE 1.6e-10, max|dg| 4.9e-7.
-   - The 16 s target needs ~3.3 s more. Section 4 ranks the remaining inefficiencies from a fresh trace.
+4. **BPA now (T4, new defaults, 3 runs, `r8_final.log`):**
+   - SCF 14.70 / 14.86 / 14.86 s, gradient 4.63–4.64 s, total 19.3–19.5 s (round 7: 21.2–22.2 s).
+   - dE 1.6–1.8e-10, max|dg| 4.8–4.9e-7.
+   - The 16 s target needs ~3.4 s more. Section 4 ranks the remaining inefficiencies from a fresh trace.
 
 ## 1. Taxol (nao 2228, naux 6598 exact / 3599 jfit / 3690 SVP-RI, nocc 226) on one T4 [M]
 
@@ -245,4 +247,5 @@ Items 1, 2 and 3 together cover the 3.3 s still missing for 16 s on BPA [E].
   Taxol without the high-RAM VM, and BPA without the surrogate tensor build.
 - The remaining FP32 Rys error source; fused FR + LR gradient pass; CRT fusion and CUDA graphs (section 4).
 - **A100 (goal 4):** still not run; the sm_80 rebuild is needed for the new library code.
-TESTS8
+- **Tests (T4, `r8_tests.log`):** `test_int8_df` (host vs device vs FP64 J), `test_multifidelity`, `test_xc_crt`,
+  `test_df_rks_grad` pass, 23/23.
