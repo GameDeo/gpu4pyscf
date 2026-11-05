@@ -62,6 +62,10 @@ def _gen_metric_solver(int2c, decompose_j2c='CD', lindep=df.LINEAR_DEP_THR):
 # Number of INT8 moduli for the two large contractions of the DF J/K gradient (0: FP64).  Set by
 # gpu4pyscf.scf.mixed_precision.grad_stage for the 'crt' scheme.
 JK_GRAD_CRT_MODULI = 0
+# Occupied-pair fitting coefficients R = J^-1 (P|ij) in the native decontracted aux order, precomputed from the SCF
+# DF tensors by the multi-fidelity SCF (keys 'fr', 'lr'; 'C' = the occupation-weighted occupied orbitals they belong
+# to).  When present and matching, the gradient skips the raw 3c recomputation and the metric solve for j3c_oo.
+FIT_OO_CACHE = None
 JK_GRAD_CRT_BUDGET = 6e8     # bytes of INT8-CRT temporaries per sub-block
 
 def _crt_contract_r(a, src3, out3, alpha=1.0, beta=0.0):
@@ -84,6 +88,47 @@ def _crt_contract_r(a, src3, out3, alpha=1.0, beta=0.0):
             out3[:, :, r0:r1] = g
         else:
             out3[:, :, r0:r1] = alpha * g
+
+def _cached_fit_oo(dm, omega, nocc, lr_factor=1, sr_factor=1):
+    cache = FIT_OO_CACHE
+    if cache is None:
+        return None
+    # only the plain operators the cache was built for: full range (omega 0, 1, 1) and pure long range (omega, 1, 0)
+    if omega == 0 and (lr_factor, sr_factor) == (1, 1):
+        key = 'fr'
+    elif omega > 0 and (lr_factor, sr_factor) == (1, 0) and abs(omega - cache.get('omega', -1)) < 1e-12:
+        key = 'lr'
+    else:
+        return None
+    R = cache.get(key)
+    if R is None or R.shape[1] != nocc or not hasattr(dm, 'mo_coeff'):
+        return None
+    from gpu4pyscf.df.df_jk import factorize_dm
+    f = factorize_dm(dm, 1)[0]
+    if f.shape != cache['C'].shape or float(abs(f - cache['C']).max()) > 1e-10:
+        return None
+    return R
+
+
+def precompute_fit_oo(dfobj, C, omega=None, lr_factor=None, sr_factor=None, nmod=15):
+    """R[k, i, j] = (J^-1 (P|ij))_k in the native decontracted aux order of dfobj.intopt.auxmol, from the stored DF
+    tensor B (= L^-1 c^T (mu nu|P)):  R = aux_coef (C^T B C).  C: occupation-weighted occupied orbitals (nao, nocc)."""
+    from gpu4pyscf.df.df import _decompose_j2c
+    nao, nocc = C.shape
+    ct = cp.ascontiguousarray(C.T)
+    T = []
+    for cderi, _ in dfobj.loop(unpack=True):
+        nL = len(cderi)
+        view = cderi.transpose(1, 0, 2)                                   # [i, L, j], L contiguous
+        if view.strides[1] != view.itemsize:
+            view = cp.ascontiguousarray(cderi.transpose(1, 2, 0)).transpose(0, 2, 1)
+        X, P1 = crt_gemm.gemm_planes(view, ct, nmod)                      # rows (i, L), cols k
+        X = X.reshape(nao, P1, nocc)[:, :nL]
+        T.append(cp.einsum('ilk,im->lkm', X, C))
+    T = cp.concatenate(T, axis=0)
+    aux_coef, _ = _decompose_j2c(dfobj.intopt.auxmol, None, omega, lr_factor, sr_factor)
+    return cp.dot(aux_coef, T.reshape(T.shape[0], -1)).reshape(-1, nocc, nocc)
+
 
 def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                         auxbasis_response=True, verbose=None,
@@ -133,11 +178,16 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
     log.debug1('%.3f GB free memory. nao_pair=%d naux=%d batch_size=%d blksize=%d',
                mem_free*1e-9, nao_pair, naux, batch_size, blksize)
 
+    fit_oo = _cached_fit_oo(dm, omega, nocc, lr_factor, sr_factor)
     aux0 = aux1 = 0
-    j3c_full = cp.zeros((nao, nao, blksize))
-    buf = cp.empty((batch_size, nao_pair))
-    buf1 = cp.empty((blksize, nocc, nao))
-    j3c_oo = cp.empty((naux, nocc, nocc))
+    if fit_oo is not None:
+        aux_batches = 0
+        log.debug('DF gradient: occupied-pair fitting coefficients taken from the SCF DF tensor')
+    else:
+        j3c_full = cp.zeros((nao, nao, blksize))
+        buf = cp.empty((batch_size, nao_pair))
+        buf1 = cp.empty((blksize, nocc, nao))
+        j3c_oo = cp.empty((naux, nocc, nocc))
     for kbatch in range(aux_batches):
         compressed = eval_j3c(aux_batch_id=kbatch, out=buf)
         naux_in_batch = compressed.shape[1]
@@ -161,14 +211,19 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
     aux_coeff[aux_sorting] = tmp
     tmp = None
 
-    j2c = int2c2e(auxmol, omega=omega, lr_factor=lr_factor, sr_factor=sr_factor)
-    if mol.omega <= 0 and not auxmol.mol.cart:
-        metric = aux_coeff.dot(_gen_metric_solver(j2c, 'CD')(aux_coeff.T))
+    if fit_oo is not None:
+        dm_oo = cp.empty_like(fit_oo)
+        dm_oo[aux_sorting] = fit_oo
+        aux_coeff = None
     else:
-        metric = aux_coeff.dot(_gen_metric_solver(j2c, 'ED')(aux_coeff.T))
-    j2c = aux_coeff = None
-    dm_oo = cp.einsum('uv,vij->uij', metric, j3c_oo)
-    metric = j3c_oo = None
+        j2c = int2c2e(auxmol, omega=omega, lr_factor=lr_factor, sr_factor=sr_factor)
+        if mol.omega <= 0 and not auxmol.mol.cart:
+            metric = aux_coeff.dot(_gen_metric_solver(j2c, 'CD')(aux_coeff.T))
+        else:
+            metric = aux_coeff.dot(_gen_metric_solver(j2c, 'ED')(aux_coeff.T))
+        j2c = aux_coeff = None
+        dm_oo = cp.einsum('uv,vij->uij', metric, j3c_oo)
+        metric = j3c_oo = None
     if j_factor != 0:
         auxvec = dm_oo.trace(axis1=1, axis2=2)
 

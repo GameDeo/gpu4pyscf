@@ -52,7 +52,8 @@ DEFAULTS = dict(
     max_stage1=60,
     fine_vco=True,                # fine XC as V_xc C_occ (occupied projection) instead of the full matrix
     fuse_grad=True,
-    coarse_xc='inc',              # 'inc': cached-AO FP32 increments of the coarse XC (stage 1: FP32 absolute); 'exact'               # XC nuclear gradient in the (predicted) last fine pass; used by the DF-RKS gradient
+    coarse_xc='inc',
+    grad_fit_reuse=True,          # precompute J^-1 (P|ij) for the DF gradient from the SCF tensors              # 'inc': cached-AO FP32 increments of the coarse XC (stage 1: FP32 absolute); 'exact'               # XC nuclear gradient in the (predicted) last fine pass; used by the DF-RKS gradient
     eig='fp64',                   # 'fp64' | 'fp32oa' (FP32 syevd + Ogita-Aishima; slower than syevd at nao~600 on T4)
     precision=None,               # dict for mixed_precision.fast_precision; default from mf.mixed_precision / GPU
 )
@@ -578,6 +579,18 @@ def kernel(mf, dm0=None, **kwargs):
     mo_energy[:nocc] = eo
     mf.mo_coeff, mf.mo_occ, mf.mo_energy = C, occ, mo_energy
     mf.e_tot = e_tot
+    from gpu4pyscf.df.grad import rhf as df_rhf_grad
+    df_rhf_grad.FIT_OO_CACHE = None
+    if opt['grad_fit_reuse'] and hist[-1][0] < conv_tol_grad:
+        # occupied-pair fitting coefficients for the DF J/K gradient from the DF tensors still in memory (the gradient
+        # frees them on entry): saves its raw 3c recomputation and metric solve
+        with tim('grad fit_oo'):
+            Cw = C[:, :nocc] * np.sqrt(2.0)
+            cache = {'C': Cw, 'omega': abs(omega), 'fr': df_rhf_grad.precompute_fit_oo(mf.with_df, Cw)}
+            if omega != 0:
+                with mf.with_df.range_coulomb(omega, None, None) as d:
+                    cache['lr'] = df_rhf_grad.precompute_fit_oo(d, Cw, omega=omega)
+            df_rhf_grad.FIT_OO_CACHE = cache
     mf.converged = hist[-1][0] < conv_tol_grad
     mf.multifidelity_stats = dict(cycles=ncyc, outer_hist=hist, timers=tim.t,
                                   wall=time.perf_counter() - t_start, conv_tol_grad=conv_tol_grad)

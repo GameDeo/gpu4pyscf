@@ -98,7 +98,13 @@ for label, mprec in (('fp64', None), ('crt', {'scheme': 'crt'})):
     print(f'[5] multi-fidelity ({label}): E = {e:.12f}  dE = {e - e_ref:.2e}  converged {m2.converged} '
           f'cycles {st["cycles"]}  {time.perf_counter() - t0:.1f} s', flush=True)
     print('    outer |g|:', ['%.1e' % g for g, _ in st['outer_hist']], flush=True)
+    from gpu4pyscf.df.grad import rhf as df_rhf_grad
+    used_cache = df_rhf_grad.FIT_OO_CACHE is not None
     gm = m2.nuc_grad_method().kernel()
+    df_rhf_grad.FIT_OO_CACHE = None
+    gm_nc = m2.nuc_grad_method().kernel()
+    print('    gradient with SCF-tensor fitting coefficients (%s) vs without: max|dg| = %.2e' % (
+        used_cache, float(abs(np.asarray(gm) - np.asarray(gm_nc)).max())), flush=True)
     gr = mf.nuc_grad_method().kernel()
     print('    gradient vs FP64 reference: max|dg| = %.2e  fused XC used: %s' % (
         float(abs(np.asarray(gm) - np.asarray(gr)).max()), m2._mf_xc_grad is not None), flush=True)

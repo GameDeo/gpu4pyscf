@@ -11,18 +11,26 @@ Date 2026-11-05. Implements the architecture of `research_report4_novel_algorith
 
 ## 0. Result
 
-| BPA, T4 | current `crt` scheme | multi-fidelity SCF (this work) | speedup |
-|---|---|---|---|
-| SCF | 37.4 s | **19.9 s** | 1.88x |
-| gradient | 13.7 s | **8.7 s** | 1.57x |
-| total | 51.1 s | **28.6 s** | **1.79x** |
-| dE vs tight FP64 ref | 1.1e-10 Eh | 8.1e-11 Eh | |
-| max gradient error | 1.1e-7 Eh/bohr | 1.2e-7 Eh/bohr | |
+Final defaults, including the SCF-tensor fitting coefficients for the gradient (3.4, built). Both T4 columns use FP32 VV10
+in the gradient.
 
-- **SCF counts:** 3 exact (outer) evaluations, 9 inner and 8 stage-1 cycles, against 17 full Fock builds in the current scheme.
-- **Outer residuals:** 7.7e-3 → 7.7e-5 → 6.9e-7. The current scheme's own tolerance (|g| < 3.2e-6) is reached at the third.
-- **History:** the original FP64 code took 249.7 + 47.1 s on this T4; this is a 10.4x reduction overall. The unoptimised
-  A100 (10.95 + 2.5 s) is still 2.1x faster.
+| BPA | T4: current `crt` | **T4: multi-fidelity** | A100: current FP64 | **A100: multi-fidelity** |
+|---|---|---|---|---|
+| SCF | 37.4 s | **20.0 s** (1.87x) | 6.51 s | **4.53 s** (1.44x) |
+| gradient | 13.7 s | **6.1 s** (2.25x) | 2.00 s | **0.88 s** (2.27x) |
+| total | 51.1 s | **26.1 s** (1.96x) | 8.51 s | **5.41 s** (1.57x) |
+| dE vs tight FP64 ref | 1.1e-10 Eh | 5.5e-11 Eh | −5.3e-10 | −6.1e-10 |
+| max gradient error | 1.1e-7 Eh/bohr | 1.7e-7 Eh/bohr | 3.3e-7 | 1.7e-7 |
+
+- **Counts:** 3 exact (outer) evaluations, 9 inner and 8 stage-1 cycles on both GPUs. The current T4 scheme uses 17 full
+  Fock builds; the A100 FP64 run uses 12.
+- **Outer residuals:** 7.7e-3 → 7.7e-5 → 7e-7.
+- **History:** the original FP64 code took 249.7 + 47.1 = 296.8 s on this T4; now 26.1 s (11.4x).
+- **Gap:** the unoptimised A100 (10.95 + 2.5 s, handoff) is still 1.9x faster than the T4. The A100 itself is now 1.57x
+  faster than its previous best plain-FP64 pipeline (A100 multi-fidelity numbers are from the second run in the session;
+  the first included JIT of the new kernels: 7.2 + 1.2 s).
+- **A100 headroom:** the FP64 path of `nr_rks_vco` is untuned (0.32 s per fine evaluation vs 0.196 s for the production
+  fused full-matrix loop), and the fused gradient adds 0.6 s there.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -135,7 +143,7 @@ All four steps are FP64-bound on a GPU with 1/32-rate FP64.
 
 | idea | mechanism | est. saving |
 |---|---|---|
-| fitting coefficients from the SCF tensor | R = J⁻¹(P\|ij) = A·(CᵀBC) from the stored DF tensor (A = L⁻ᵀ of the SCF aux transform; independent of aux sorting and AO representation). Removes step 1 and the J⁻¹ GEMM. Must run before the gradient's `with_df.reset()`, i.e. at the end of the SCF | ~1.2 s |
+| **built:** fitting coefficients from the SCF tensor | R = J⁻¹(P\|ij) = aux_coef·(CᵀBC) from the stored DF tensors at the end of the SCF (`df/grad/rhf.py::precompute_fit_oo`, used by `_jk_energy_per_atom` when the operator and orbitals match). Removes the raw 3c recompute, the 90-GFLOP contraction and the J⁻¹ solve. Gradient vs full recomputation: 2e-9 | **measured:** gradient 8.7 → 6.1 s, +1.0 s at the end of the SCF |
 | Γ-weighted Rys screening | skip (shell pair, aux shell) blocks with max\|Γ\|·Schwarz bound < 1e-12: Γ is known before the kernel runs | small at 33 atoms, large at 100+ |
 | MO-transformed derivative driver | contract C inside the Rys kernel (half-transformed derivative integrals) instead of materialising Γ in AO-pair space: removes the 90 GFLOP short-reduction FP64 GEMM and the pair compression | ~1.5 s (kernel work) |
 | double-float Rys | Rys roots/weights and recurrences in FP32 pairs (~48 bits) on non-FP64 GPUs | ~2x of the Rys part |
@@ -185,9 +193,22 @@ remainder is FP64-bound integral evaluation that INT8 cannot express. Being hone
 
 ---------------------------------------------------------------------------------------------------
 
-## 6. A100
+## 6. A100 (sm_80 libraries built on the T4 host; session stopped after the run)
 
-(filled in below if measured)
+| component (A100, multi-fidelity, 2nd run) | s |
+|---|---|
+| fine XC + fused gradient (last outer) | 0.92 |
+| fine XC, 2 outers | 0.64 |
+| surrogate K, stage 1 (incl. build) | 0.49 |
+| exact K, 3 outers | 0.33 |
+| exact DF build | 0.30 |
+| fine NLC, 3 outers | 0.30 |
+| coarse XC (inc + FP32 abs + refs) | 0.53 |
+| J 0.15, eig 0.15, setup 0.15, grad fit_oo 0.18, rest | ~0.7 |
+
+The A100 is now glue- and FP64-path-bound. The next steps there:
+- a fused FP64 tensor-core V·C kernel, which should reach the 0.196 s of the full-matrix loop or less;
+- a CUDA graph for the fixed-shape inner cycle.
 
 ## 7. Files
 - `gpu4pyscf/scf/multifidelity.py`, `gpu4pyscf/dft/numint.py` (`nr_rks_vco`, `_half_transform`, `_BUILD_Y_SRC`),

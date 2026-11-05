@@ -1,0 +1,449 @@
+#INFO: **** input file is /content/src/gpu4pyscf/benchmarks/dft/bench_wb97mv.py ****
+#!/usr/bin/env python
+'''
+Stage-resolved benchmark / regression driver for RKS + density fitting + (VV10) NLC.
+
+Example:
+    python bench_wb97mv.py --mol 042_Penicillin_V --basis def2-tzvp --xc wb97m-v
+
+Every GPU-side stage is wrapped with a synchronising timer, so the printed table
+shows where the wall-clock time goes (grid build, DF tensor build, J, K, XC, VV10 ...).
+The final energy is printed with 10 digits so that it can be compared to a reference
+(see --ref/--tol) when checking that an optimisation does not change the answer.
+'''
+import os
+import sys
+import json
+import time
+import argparse
+import collections
+import functools
+import numpy as np
+import cupy
+import pyscf
+from pyscf import gto
+
+STAGES = collections.OrderedDict()
+
+
+def _sync():
+    cupy.cuda.get_current_stream().synchronize()
+
+
+def timed(name, obj, attr):
+    '''Replace obj.attr by a version that accumulates synchronised wall time under `name`.'''
+    f = getattr(obj, attr)
+    STAGES.setdefault(name, [0.0, 0])  # register now so a timer that never fires is reported
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        _sync()
+        t0 = time.perf_counter()
+        try:
+            return f(*args, **kwargs)
+        finally:
+            _sync()
+            dt = time.perf_counter() - t0
+            rec = STAGES.setdefault(name, [0.0, 0])
+            rec[0] += dt
+            rec[1] += 1
+    setattr(obj, attr, wrapper)
+
+
+def install_timers():
+    from gpu4pyscf.dft import numint, gen_grid, rks
+    from gpu4pyscf.df import df, df_jk
+    timed('grids.build', gen_grid.Grids, 'build')
+    # get_veff calls these through the NumInt instance, so patch the class attributes
+    timed('XC main (nr_rks)', numint.NumInt, 'nr_rks')
+    timed('NLC total (nr_nlc_vxc)', numint.NumInt, 'nr_nlc_vxc')
+    timed('  VV10 kernels (_vv10nlc)', numint, '_vv10nlc')
+    timed('  DF.build (cderi)', df.DF, 'build')  # nested inside get_jk
+    timed('df_jk.get_jk', df_jk, 'get_jk')
+
+
+def install_fine_timers():
+    '''Finer-grained (synchronising, so slightly pessimistic) timers inside the XC pipeline.'''
+    from gpu4pyscf.dft import numint
+    timed('  . eval_ao', numint, 'eval_ao')
+    timed('  . eval_rho (_eval_rho2/eval_rho)', numint, '_eval_rho2')
+    timed('  . eval_rho dm path', numint, 'eval_rho')
+    timed('  . eval_xc_eff (libxc)', numint.NumInt, 'eval_xc_eff')
+    timed('  . _scale_ao', numint, '_scale_ao')
+    timed('  . _tau_dot', numint, '_tau_dot')
+    timed('  . add_sparse', numint, 'add_sparse')
+    timed('  . contract (cutensor)', numint, 'contract')
+
+
+def build_mol(args):
+    path = args.mol
+    if not os.path.exists(path):
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, '..', 'molecules', 'organic', args.mol + '.xyz')
+    mol = gto.M(atom=path, basis=args.basis, verbose=args.verbose, max_memory=args.max_memory)
+    return mol
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--mol', default='042_Penicillin_V')
+    p.add_argument('--basis', default='def2-tzvp')
+    p.add_argument('--auxbasis', default='def2-universal-jkfit')
+    p.add_argument('--xc', default='wb97m-v')
+    p.add_argument('--grid', type=int, nargs=2, default=(99, 590))
+    p.add_argument('--nlcgrid', type=int, nargs=2, default=(50, 194))
+    p.add_argument('--max_cycle', type=int, default=50)
+    p.add_argument('--conv_tol', type=float, default=1e-9)
+    p.add_argument('--verbose', type=int, default=4)
+    p.add_argument('--max_memory', type=int, default=40000)
+    p.add_argument('--vv10', default='fp64', choices=['fp64', 'fp32'], help='precision of the VV10 pair kernel')
+    p.add_argument('--kprec', default='fp64', choices=['fp64', 'fp32', 'crt'], help='precision of the DF-K GEMMs (all iterations)')
+    p.add_argument('--mixed', default=None, choices=['fp32', 'tf32x3', 'auto'], help='staged mixed-precision SCF (K precision of stage 1)')
+    p.add_argument('--xcprec', default='fp64', choices=['fp64', 'fp32', 'tf32x3', 'crt'], help='precision of XC grid GEMMs (all iterations)')
+    p.add_argument('--crt_n', type=int, default=11, help='number of INT8 moduli for xcprec/kprec crt')
+    p.add_argument('--final_grad_factor', type=float, default=None, help='stage-2 gradient-threshold factor of the staged scheme')
+    p.add_argument('--scheme', default=None, choices=['auto', 'crt', 'classic'], help='mixed-precision scheme (see scf/mixed_precision.py)')
+    p.add_argument('--no1b', action='store_true', help='disable stage 1b (FP64 K + reduced XC polish)')
+    p.add_argument('--grad', action='store_true')
+    p.add_argument('--profile', action='store_true', help='add fine-grained (synchronising) timers inside the XC pipeline')
+    p.add_argument('--warmup', action='store_true', help='run a tiny SCF first to exclude JIT costs')
+    p.add_argument('--out', default=None, help='write a json summary here')
+    p.add_argument('--ref', default=None, help='json summary of a reference run to compare against')
+    p.add_argument('--tol', type=float, default=1e-7, help='|E - E_ref| tolerance in Eh')
+    p.add_argument('--set', nargs='*', default=[], help='extra mf attributes, e.g. --set nlcgrids.level=1')
+    p.add_argument('--multifidelity', default=None,
+                   help="multi-fidelity SCF (scf/multifidelity.py): '{}' or a dict literal of options")
+    args = p.parse_args()
+
+    import gpu4pyscf
+    from gpu4pyscf import dft
+    if args.warmup:
+        w = gto.M(atom='O 0 0 0; H 0 0.75 0.6; H 0 -0.75 0.6', basis='def2-svp', verbose=0)
+        wm = dft.RKS(w, xc=args.xc).density_fit()
+        wm.grids.atom_grid = (20, 50)
+        wm.nlcgrids.atom_grid = (10, 26)
+        wm.kernel()
+        wm.nuc_grad_method().kernel() if args.grad else None
+    from gpu4pyscf.dft import numint as _numint
+    from gpu4pyscf.df import df_jk as _df_jk
+    _numint.VV10_PRECISION = args.vv10
+    _df_jk.K_PRECISION = args.kprec
+    _numint.XC_PRECISION = args.xcprec
+    _numint.XC_CRT_MODULI = args.crt_n
+    _df_jk.K_CRT_MODULI = args.crt_n
+    install_timers()
+    if args.profile:
+        install_fine_timers()
+
+    mol = build_mol(args)
+    mf = dft.RKS(mol, xc=args.xc).density_fit(auxbasis=args.auxbasis)
+    mf.grids.atom_grid = tuple(args.grid)
+    mf.nlcgrids.atom_grid = tuple(args.nlcgrid)
+    mf.conv_tol = args.conv_tol
+    if args.mixed:
+        if args.mixed == 'auto':   # K/XC precision chosen by GPU generation (FP64 on sm_80+)
+            mf.mixed_precision = {'vv10_precision': 'fp32'}
+        else:
+            mf.mixed_precision = {'k_precision': args.mixed, 'xc_precision': args.mixed}
+        if args.final_grad_factor is not None:
+            mf.mixed_precision['final_grad_factor'] = args.final_grad_factor
+        if args.no1b:
+            mf.mixed_precision['stage1b'] = False
+        if args.scheme:
+            mf.mixed_precision['scheme'] = args.scheme
+    mf.max_cycle = args.max_cycle
+    if args.multifidelity is not None:
+        mf.multifidelity = eval(args.multifidelity) or True
+    for s in args.set:
+        k, v = s.split('=')
+        obj = mf
+        parts = k.split('.')
+        for q in parts[:-1]:
+            obj = getattr(obj, q)
+        setattr(obj, parts[-1], eval(v))
+
+    print(f'# {args.mol} natm={mol.natm} nao={mol.nao} basis={args.basis} aux={args.auxbasis} '
+          f'xc={args.xc} grid={args.grid} nlcgrid={args.nlcgrid}')
+    print(f'# GPU: {cupy.cuda.runtime.getDeviceProperties(0)["name"].decode()}')
+    _sync()
+    t0 = time.perf_counter()
+    e = mf.kernel()
+    _sync()
+    t_scf = time.perf_counter() - t0
+    res = {'energy': float(e), 'converged': bool(mf.converged), 'scf_time': t_scf,
+           'ngrids': int(mf.grids.size), 'nlc_ngrids': int(mf.nlcgrids.size) if mf.do_nlc() else 0,
+           'nao': int(mol.nao), 'stages': {k: {'sec': v[0], 'calls': v[1]} for k, v in STAGES.items()}}
+    res['cycles'] = int(getattr(mf, 'cycles', -1))
+    res['cycles_coarse'] = int(getattr(mf, 'cycles_coarse', 0))
+    res['cycles_stage1'] = int(getattr(mf, 'cycles_stage1', 0))
+    res['cycles_stage1b'] = int(getattr(mf, 'cycles_stage1b', 0))
+    try:
+        dfobj = mf.with_df
+        nbytes = 0
+        for obj in [dfobj] + list(getattr(dfobj, '_rsh_df', {}).values()):
+            c = getattr(obj, '_cderi', None)
+            if c is not None:
+                nbytes += sum(int(x.nbytes) for x in (c.values() if isinstance(c, dict) else c))
+        res['cderi_GB'] = nbytes / 1e9
+        print(f'# DF tensors held: {nbytes / 1e9:.2f} GB; GPU mem pool used: '
+              f'{cupy.get_default_memory_pool().total_bytes() / 1e9:.2f} GB')
+    except Exception as ex:  # reporting only
+        print('# (could not size DF tensors:', ex, ')')
+    if args.grad:
+        _sync()
+        t0 = time.perf_counter()
+        g = mf.nuc_grad_method().kernel()
+        _sync()
+        res['grad_time'] = time.perf_counter() - t0
+        res['grad'] = np.asarray(g).tolist()
+
+    print(f'E = {e:.10f}  converged={mf.converged}  cycles(stage2/FP64)={res["cycles"]} coarse={res["cycles_coarse"]} stage1={res["cycles_stage1"]} stage1b={res["cycles_stage1b"]}  '
+          f'ngrids={res["ngrids"]} nlc_ngrids={res["nlc_ngrids"]}')
+    print(f'SCF wall time: {t_scf:.2f} s   ({t_scf / max(res["cycles"], 1):.2f} s/cycle incl. setup)')
+    print(f'{"stage":32s} {"total/s":>9s} {"calls":>6s} {"per-call/s":>11s}')
+    for k, (sec, n) in STAGES.items():
+        print(f'{k:32s} {sec:9.3f} {n:6d} {sec / max(n, 1):11.3f}')
+    # nested timers (indented names) are not part of the top-level sum
+    top = sum(v[0] for k, v in STAGES.items() if not k.startswith(' '))
+    print(f'{"unaccounted (diag, DIIS, misc)":32s} {t_scf - top:9.3f}')
+    res['unaccounted'] = t_scf - top
+    dead = [k for k, v in STAGES.items() if v[1] == 0]
+    if dead:
+        print('WARNING: timers that never fired:', dead)
+    if args.grad:
+        print(f'gradient time: {res["grad_time"]:.2f} s')
+    st = getattr(mf, 'multifidelity_stats', None)
+    if st:
+        print('multi-fidelity cycles', st['cycles'], 'conv_tol_grad %.1e' % st['conv_tol_grad'])
+        for g_, e_ in st['outer_hist']:
+            print(f'  outer |g| = {g_:.3e}  E = {e_:.12f}')
+        for k_, (sec_, n_) in sorted(st['timers'].items(), key=lambda kv: -kv[1][0]):
+            print(f'  {k_:20s} {sec_:8.3f} s {n_:5d} calls {sec_ / max(n_, 1):8.4f} s/call')
+        res['multifidelity'] = {'cycles': st['cycles'], 'outer_hist': st['outer_hist'],
+                                'timers': {k_: list(v_) for k_, v_ in st['timers'].items()}, 'wall': st['wall']}
+
+    status = 0
+    if args.ref:
+        ref = json.load(open(args.ref))
+        dE = res['energy'] - ref['energy']
+        print(f'dE vs ref = {dE:.3e} Eh  (tol {args.tol:.1e})')
+        if abs(dE) > args.tol:
+            print('REGRESSION CHECK FAILED (energy)')
+            status = 1
+        if args.grad and 'grad' in ref:
+            dg = np.abs(np.asarray(res['grad']) - np.asarray(ref['grad'])).max()
+            print(f'max |dgrad| vs ref = {dg:.3e}')
+            if dg > 10 * args.tol:
+                print('REGRESSION CHECK FAILED (gradient)')
+                status = 1
+    if args.out:
+        json.dump(res, open(args.out, 'w'), indent=1)
+    sys.exit(status)
+
+
+if __name__ == '__main__':
+    main()
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='fb32606a4be6', release='6.6.159+', version='#1 SMP Thu Oct 22 03:07:54 UTC 2026', machine='x86_64')  Threads 12
+Python 3.13.16 (main, Oct  1 2026, 15:40:24) [GCC 13.3.0]
+numpy 2.4.6  scipy 1.16.3  h5py 3.14.0
+Date: Thu Nov  5 02:44:18 2026
+PySCF version 2.14.0
+PySCF path  /usr/local/lib/python3.13/dist-packages/pyscf/__init__.py
+CUDA Environment
+    CuPy 14.0.1
+    CUDA Path None
+    CUDA Build Version 13000
+    CUDA Driver Version 13000
+    CUDA Runtime Version 13000
+CUDA toolkit
+    cuSolver (12, 0, 4)
+    cuBLAS 130100
+    cuTENSOR 20800
+Device info
+    Device name b'NVIDIA A100-SXM4-40GB'
+    Device global memory 39.49 GB
+    CuPy memory fraction 0.9
+    Num. Devices 1
+GPU4PySCF 1.9.0
+GPU4PySCF path  /content/src/gpu4pyscf/gpu4pyscf
+
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 33
+[INPUT] num. electrons = 122
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 0
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = angstrom
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 C      0.173022170000  -0.053678700000   0.020602300000 AA    0.326964514778  -0.101438041723   0.038932704536 Bohr   0.0
+[INPUT]  2 C      0.686364420000   0.674714390000   1.276597220000 AA    1.297040775446   1.275025409403   2.412419117181 Bohr   0.0
+[INPUT]  3 H      0.331308070000   1.684083690000   1.273662480000 AA    0.626081515158   3.182456944947   2.406873262334 Bohr   0.0
+[INPUT]  4 H      0.328095330000   0.173140970000   2.151221340000 AA    0.620010316449   0.327189014242   4.065219165920 Bohr   0.0
+[INPUT]  5 H      1.756362610000   0.673009610000   1.277579260000 AA    3.319044308326   1.271803842100   2.414274903824 Bohr   0.0
+[INPUT]  6 C      0.686364360000   0.669838030000  -1.238207990000 AA    1.297040662062   1.265810424518  -2.339873986348 Bohr   0.0
+[INPUT]  7 H      1.756364290000   0.670151620000  -1.238019860000 AA    3.319047483066   1.266403023734  -2.339518472172 Bohr   0.0
+[INPUT]  8 H      0.329998960000   0.163528480000  -2.110878800000 AA    0.623607655791   0.309024040766  -3.988982814151 Bohr   0.0
+[INPUT]  9 H      0.329402460000   1.678537000000  -1.240352860000 AA    0.622480434158   3.171975219949  -2.343927203221 Bohr   0.0
+[INPUT] 10 C     -1.366977830000  -0.053659720000   0.020602300000 AA   -2.583213717052  -0.101402174721   0.038932704536 Bohr   0.0
+[INPUT] 11 C     -2.064514160000  -1.261926660000   0.022948880000 AA   -3.901366342686  -2.384695776687   0.043367098066 Bohr   0.0
+[INPUT] 12 C     -2.064468560000   1.154251630000   0.018367640000 AA   -3.901280171175   2.181219459533   0.034709809155 Bohr   0.0
+[INPUT] 13 C     -3.459226080000  -1.262188370000   0.022378720000 AA   -6.536989894153  -2.385190336911   0.042289651818 Bohr   0.0
+[INPUT] 14 H     -1.514332850000  -2.214051300000   0.023933070000 AA   -2.861674347932  -4.183950582737   0.045226947620 Bohr   0.0
+[INPUT] 15 C     -3.459606440000   1.154165010000   0.018792920000 AA   -6.537708670382   2.181055771456   0.035513471881 Bohr   0.0
+[INPUT] 16 H     -1.514859540000   2.106646590000   0.016697900000 AA   -2.862669647785   3.980985096349   0.031554457855 Bohr   0.0
+[INPUT] 17 C     -4.157042630000  -0.053773850000   0.020659830000 AA   -7.855672058842  -0.101617849163   0.039041420480 Bohr   0.0
+[INPUT] 18 H     -4.009100690000  -2.214518650000   0.023594210000 AA   -7.576102309905  -4.184833746242   0.044586595025 Bohr   0.0
+[INPUT] 19 H     -4.009279700000   2.106704620000   0.017446030000 AA   -7.576440589778   3.981094757156   0.032968218661 Bohr   0.0
+[INPUT] 20 C      0.686337880000  -1.505608120000   0.023417670000 AA    1.296990622115  -2.845186997721   0.044252982775 Bohr   0.0
+[INPUT] 21 C      0.919462880000  -2.165360880000  -1.183582930000 AA    1.737533024904  -4.091939024047  -2.236647583410 Bohr   0.0
+[INPUT] 22 C      0.918310960000  -2.161066240000   1.232595610000 AA    1.735356211586  -4.083823330644   2.329268125241 Bohr   0.0
+[INPUT] 23 C      1.383812980000  -3.480501770000  -1.181310910000 AA    2.615027539818  -6.577195121364  -2.232354087861 Bohr   0.0
+[INPUT] 24 H      0.735749200000  -1.648592800000  -2.136705080000 AA    1.390364484368  -3.115388882930  -4.037787410167 Bohr   0.0
+[INPUT] 25 C      1.383741790000  -3.476276500000   1.235041470000 AA    2.614893010215  -6.569210518262   2.333890130780 Bohr   0.0
+[INPUT] 26 H      0.734794480000  -1.641167370000   2.183992420000 AA    1.388560325042  -3.101356853873   4.127147531926 Bohr   0.0
+[INPUT] 27 C      1.616381600000  -4.136093960000   0.028369740000 AA    3.054518536786  -7.816084809868   0.053611038825 Bohr   0.0
+[INPUT] 28 H      1.566989800000  -4.000802290000  -2.132641630000 AA    2.961181561987  -7.560420606633  -4.030108602546 Bohr   0.0
+[INPUT] 29 H      1.566944720000  -3.992685490000   2.188578400000 AA    2.961096373133  -7.545082077625   4.135813778139 Bohr   0.0
+[INPUT] 30 O      2.092552880000  -5.484484440000   0.030374170000 AA    3.954351844370 -10.364173526039   0.057398862561 Bohr   0.0
+[INPUT] 31 H      3.052551420000  -5.485317590000   0.031828910000 AA    5.768486164952 -10.365747951359   0.060147922743 Bohr   0.0
+[INPUT] 32 O     -5.587042420000  -0.054367110000   0.020152670000 AA  -10.557980020127  -0.102738948084   0.038083026979 Bohr   0.0
+[INPUT] 33 H     -5.907970500000   0.437884940000   0.779292370000 AA  -11.164446197010   0.827482610672   1.472649150263 Bohr   0.0
+
+nuclear repulsion = 1150.07437961029
+number of shells = 251
+number of NR pGTOs = 910
+number of NR cGTOs = 623
+basis = def2-tzvp
+ecp = {}
+CPU time:        22.41
+# 033_Bisphenol_A natm=33 nao=623 basis=def2-tzvp aux=def2-universal-jkfit xc=wb97m-v grid=(99, 590) nlcgrid=(50, 194)
+# GPU: NVIDIA A100-SXM4-40GB
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+radial grids: 
+Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7a36e83ad440>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7a36e83ad3a0>
+User specified grid scheme (99, 590)
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+radial grids: 
+Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7a36e83ad440>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7a36e83ad3a0>
+User specified grid scheme (50, 194)
+small_rho_cutoff = 0
+Set gradient conv threshold to 3.16228e-05
+Initial guess from minao
+tot grids = 1063936
+tot grids = 217344
+Create RSH-DF object <gpu4pyscf.df.df.DF object at 0x7a36e6fd7230> for omega=0.3
+init E= -735.427082878093
+  HOMO = -0.246916789409725  LUMO = -0.0406168932380888  gap/eV = 5.61371
+cycle= 1 E= -731.495758719574  delta_E= 3.93  |g|= 0.847  |ddm|= 4.97
+  HOMO = -0.288624278342059  LUMO = 0.0499299767816397  gap/eV = 9.21253
+cycle= 2 E= -731.528990754186  delta_E= -0.0332  |g|= 0.855  |ddm|= 5.42
+  HOMO = -0.318527075497233  LUMO = 0.0494742199472454  gap/eV = 10.01383
+cycle= 3 E= -731.647508178089  delta_E= -0.119  |g|= 0.0856  |ddm|= 3.27
+  HOMO = -0.323398449821395  LUMO = 0.044367770379029  gap/eV = 10.00743
+cycle= 4 E= -731.649062258321  delta_E= -0.00155  |g|= 0.0369  |ddm|= 0.344
+  HOMO = -0.321259360486245  LUMO = 0.0475513611563555  gap/eV = 10.03585
+cycle= 5 E= -731.649380394458  delta_E= -0.000318  |g|= 0.00945  |ddm|= 0.0701
+  HOMO = -0.321088205301983  LUMO = 0.0473690170379236  gap/eV = 10.02623
+cycle= 6 E= -731.649401079293  delta_E= -2.07e-05  |g|= 0.00324  |ddm|= 0.0307
+  HOMO = -0.321414113778474  LUMO = 0.0471650975773603  gap/eV = 10.02955
+cycle= 7 E= -731.649403940535  delta_E= -2.86e-06  |g|= 0.00109  |ddm|= 0.0142
+  HOMO = -0.321358354449063  LUMO = 0.0472241213831603  gap/eV = 10.02964
+cycle= 8 E= -731.649404424186  delta_E= -4.84e-07  |g|= 0.000465  |ddm|= 0.005
+  HOMO = -0.321344907509118  LUMO = 0.0472238457546139  gap/eV = 10.02927
+cycle= 9 E= -731.649404496749  delta_E= -7.26e-08  |g|= 0.00013  |ddm|= 0.00243
+  HOMO = -0.321356236839712  LUMO = 0.0472201425615894  gap/eV = 10.02947
+cycle= 10 E= -731.649404509113  delta_E= -1.24e-08  |g|= 4.23e-05  |ddm|= 0.000766
+  HOMO = -0.321357057925125  LUMO = 0.0472187951720957  gap/eV = 10.02946
+cycle= 11 E= -731.649404510497  delta_E= -1.38e-09  |g|= 2.46e-05  |ddm|= 0.000166
+  HOMO = -0.321356487523529  LUMO = 0.0472194894190931  gap/eV = 10.02946
+cycle= 12 E= -731.649404510668  delta_E= -1.71e-10  |g|= 7.12e-06  |ddm|= 9.05e-05
+converged SCF energy = -731.649404510668
+# DF tensors held: 2.98 GB; GPU mem pool used: 0.57 GB
+
+
+******** <class 'gpu4pyscf.df.grad.rks.Gradients'> for <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+unit = Eh/Bohr
+max_memory 40000 MB (current use 1655 MB)
+--------------- DFRKS gradients ---------------
+         x                y                z
+0 C     0.0011251032     0.0061816385    -0.0000260637
+1 C     0.0083836202     0.0082534352     0.0176558265
+2 H     0.0035277131    -0.0130531044    -0.0021759893
+3 H     0.0043648284    -0.0006600712    -0.0120984148
+4 H    -0.0146467242    -0.0008791515    -0.0016910101
+5 C     0.0084445961     0.0081966244    -0.0176706590
+6 H    -0.0146561819    -0.0008748377     0.0016603741
+7 H     0.0043729412    -0.0006876198     0.0120642465
+8 H     0.0035477611    -0.0130204155     0.0022680724
+9 C    -0.0113852115     0.0047667674    -0.0000271257
+10 C     0.0066935176    -0.0016736298     0.0015822370
+11 C     0.0052631158     0.0005672008    -0.0003380207
+12 C     0.0085746163     0.0040751752     0.0011161253
+13 H     0.0092982564    -0.0108310446    -0.0000895722
+14 C     0.0003168573    -0.0060358081    -0.0003447645
+15 H     0.0070011280     0.0090308408     0.0000058416
+16 C     0.0185303496    -0.0021092991    -0.0058242471
+17 H    -0.0037419113    -0.0111526233    -0.0003340019
+18 H    -0.0041650807     0.0101608864     0.0005462585
+19 C    -0.0029820129    -0.0144826774     0.0000669947
+20 C    -0.0014378156     0.0055050236    -0.0013809175
+21 C    -0.0016908835     0.0056929240     0.0013653779
+22 C    -0.0004657438     0.0044144473     0.0049685174
+23 H    -0.0029863148     0.0102581483    -0.0109991953
+24 C    -0.0002953681     0.0041789998    -0.0053546182
+25 H    -0.0029470219     0.0102254174     0.0109336386
+26 C    -0.0112756799     0.0130649549     0.0002865445
+27 H     0.0013024019    -0.0035091497    -0.0109381876
+28 H     0.0013000410    -0.0034529249     0.0109965665
+29 O     0.0157860316    -0.0238039683     0.0000055058
+30 H    -0.0017174928    -0.0033772686     0.0000021189
+31 O    -0.0303379018     0.0080582886     0.0048422509
+32 H    -0.0030958901    -0.0030190465    -0.0010733513
+----------------------------------------------
+E = -731.6494045107  converged=True  cycles(stage2/FP64)=12 coarse=0 stage1=0 stage1b=0  ngrids=1063936 nlc_ngrids=217344
+SCF wall time: 6.51 s   (0.54 s/cycle incl. setup)
+stage                              total/s  calls  per-call/s
+grids.build                          0.023      2       0.012
+XC main (nr_rks)                     3.064     13       0.236
+NLC total (nr_nlc_vxc)               1.878     13       0.144
+  VV10 kernels (_vv10nlc)            1.503     14       0.107
+  DF.build (cderi)                   0.541      2       0.270
+df_jk.get_jk                         0.977     26       0.038
+unaccounted (diag, DIIS, misc)       0.568
+gradient time: 2.00 s
+dE vs ref = -5.318e-10 Eh  (tol 1.0e-07)
+max |dgrad| vs ref = 3.328e-07

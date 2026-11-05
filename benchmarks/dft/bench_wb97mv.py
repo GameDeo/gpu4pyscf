@@ -121,6 +121,8 @@ def main():
         wm = dft.RKS(w, xc=args.xc).density_fit()
         wm.grids.atom_grid = (20, 50)
         wm.nlcgrids.atom_grid = (10, 26)
+        if args.multifidelity is not None:      # JIT of the multi-fidelity kernels
+            wm.multifidelity = eval(args.multifidelity) or True
         wm.kernel()
         wm.nuc_grad_method().kernel() if args.grad else None
     from gpu4pyscf.dft import numint as _numint
