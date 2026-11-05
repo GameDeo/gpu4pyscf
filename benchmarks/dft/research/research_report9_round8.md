@@ -18,7 +18,8 @@ Date 2026-11-05.
      - a seminumerical (COSX-type) exchange on a small grid.
    - Contraction per exact checkpoint is 884/996/377x, against 228/111/103x for the round-7 surrogate. With the
      inner loop converged to 1e-3 of the outer gradient, ~1000x is the ceiling: the seminumerical surrogate sits on it,
-     so its true rate is at least that (a run with inner_factor 1e-4 is below).
+     so its true rate is at least that. With inner_factor 1e-4 the first step contracts 1481x (later steps approach
+     the numerical floor near 1e-10).
    - **Limits of this evidence:** HF on phenol on a CPU (lambda_min(S) 1.1e-5, vs 3.4e-6 for Taxol); the
      long-range erf exchange that dominates wB97M-V is not in the test.
    - Surrogate memory drops from O(npairs * naux), about N^3 for compact molecules (39 GB at Taxol), to
@@ -87,7 +88,7 @@ and for the density D0:
 | grid-fitted J with jfit aux | | J 4.4e-2 | | (= jfit DF) |
 | **seminumerical K (level-1 grid) + grid-fitted J** | grid batch | K 7.0e-4 | 1.46e-2, 1.65e-5, 1.65e-8, 4.4e-11 | **884, 996, 377** |
 | seminumerical K, level-0 grid + grid-fitted J | grid batch | K 2.6e-3 | 1.46e-2, 1.9e-5, 3.8e-8, 1.3e-10 | 773, 496, 285 |
-| seminumerical K (level 1) + grid-fitted J, inner_factor 1e-4 | grid batch | K 7.0e-4 | SGX1B_ROW |
+| seminumerical K (level 1) + grid-fitted J, inner_factor 1e-4 | grid batch | K 7.4e-4 | 1.46e-2, 9.8e-6, 1.1e-8, 4.1e-11 | **1481**, 905, 266 |
 
 The 884/996x rates are at the ~1000x ceiling set by the inner tolerance (1e-3 of the outer gradient); the
 inner_factor 1e-4 row measures the surrogate itself.
@@ -133,7 +134,7 @@ The near-null safety is argued from the operator structure and measured only at 
 - **Time.** Taxol SCF: -433 s of surrogate build/streaming, +~13 x 3 s of seminumerical K, i.e. 1320 s to ~930 s.
 - **Checkpoints.** Two checkpoints at Taxol need 3.8e-2 to 3.16e-5 in one step, i.e. ~1200x. That is impossible
   at inner_factor 1e-3 whatever the surrogate. It needs the better surrogate and inner_factor ~1e-4, which a cheap
-  surrogate makes affordable. A stage 1 run with the better surrogate also starts closer: its |g| at checkpoint 0 is
+  surrogate makes affordable; on phenol that combination gives 1481x in the first step, above the 1200x needed. A stage 1 run with the better surrogate also starts closer: its |g| at checkpoint 0 is
   the surrogate's systematic error. If both hold, another -240 s; projected Taxol SCF ~10–12 min on a T4 [E].
 
 **Asymptotic scaling after this change** (N ~ system size, compact molecules):
