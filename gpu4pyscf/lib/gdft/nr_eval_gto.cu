@@ -93,19 +93,30 @@ static void _screen_index(int8_t *non0shl_mask, double log_cutoff,
             continue;
         }
         int ng_in_tile = min(NG_PER_BLOCK, ngrids-grid0);
-        // screening only decides which shells are kept: FP32 exp/log (FP64 is 1/32 rate on consumer/T4 GPUs), with a
-        // 0.05 margin on log_cutoff so that rounding can only keep a borderline shell, never drop one
-        float log_cut32 = (float)log_cutoff - 0.05f;
+        // FP32 exp/log first (FP64 is 1/32 rate on consumer/T4 GPUs); only a value within 0.05 of log_cutoff is
+        // re-evaluated with the original FP64 expression, so the decision is identical to the FP64 screening
+        float lo32 = (float)log_cutoff - 0.05f;
+        float hi32 = (float)log_cutoff + 0.05f;
         for (int grid_id = 0; grid_id < ng_in_tile; ++grid_id) {
             double rx = gridx_cache[grid_id] - atom_x;
             double ry = gridy_cache[grid_id] - atom_y;
             double rz = gridz_cache[grid_id] - atom_z;
-            float rr = fmaxf((float)(rx * rx + ry * ry + rz * rz), 1e-30f);
+            double rr64 = rx * rx + ry * ry + rz * rz + 1e-300;
+            float rr = fmaxf((float)rr64, 1e-30f);
             float gto_sup = 0.f;
             for (int ip = 0; ip < nprim; ++ip) {
                 gto_sup += (float)coeffs[ip] * expf(-(float)exps[ip] * rr);
             }
-            is_large |= logf(fabsf(gto_sup) + 1e-37f) + ang*logf(rr)*.5f > log_cut32;
+            float v32 = logf(fabsf(gto_sup) + 1e-37f) + ang*logf(rr)*.5f;
+            if (v32 > hi32) {
+                is_large = 1;
+            } else if (v32 > lo32) {
+                double sup64 = 1e-300;
+                for (int ip = 0; ip < nprim; ++ip) {
+                    sup64 += coeffs[ip] * exp(-exps[ip] * rr64);
+                }
+                is_large |= log(fabs(sup64)) + ang*log(rr64)/2 > log_cutoff;
+            }
         }
     }
     if (shl_block_id * blockDim.x + thread_id < nbas) {

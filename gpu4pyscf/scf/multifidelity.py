@@ -45,8 +45,10 @@ DEFAULTS = dict(
     k_increment='fp32',           # 'fp32' | 'fp16' | 'exact' (exact = surrogate DF-K at every inner step)
                                   # fp16 noise (~1e-3 of K(dD)) stalls the inner loop for BPA-size systems
     stage1_conv_grad=1e-3,
-    inner_factor=1e-2,            # inner tolerance = inner_factor * |g_true| of the last outer step
-    conv_tol_grad=None,           # outer tolerance on |g| (pyscf orbital-gradient norm); default 0.1*sqrt(conv_tol)
+    inner_factor=1e-3,            # inner tolerance = inner_factor * |g_true| of the last outer step (BPA: the surrogate
+                                  # contracts |g| by ~400 per outer, so 1e-3 lets 2 exact evaluations reach 3e-5)
+    conv_tol_grad=None,           # outer tolerance on |g| (pyscf orbital-gradient norm); default sqrt(conv_tol), pyscf's
+                                  # own default (BPA: dE 2e-10, max|dg| 4.6e-7 vs 4e-11 / 4.2e-7 for the stock FP64 SCF)
     max_outer=12,
     max_inner=40,
     max_stage1=60,
@@ -64,7 +66,15 @@ DEFAULTS = dict(
     medium_moduli=9,              # 'medium' level: fine grids, fewer moduli
     cheap_factor=100.,            # level from the predicted residual est = inner_factor * |g| of the previous outer:
     medium_factor=3.,             # est > cheap_factor * tol -> cheap, > medium_factor * tol -> medium, else exact
-    exact_k='stored',             # 'stored': DF tensors in memory; 'direct': two streamed integral passes per outer
+    surrogate_store='auto',       # 'dense' (FP32 unpacked tensor), 'int8' (df.int8_df, ~1 byte per pair x aux), 'auto':
+                                  # int8 when the dense tensor would exceed 30 % of the GPU memory
+    surrogate_j='auto',           # 'exact' (stored DF J every inner cycle) | 'int8' (J_s from an INT8 Coulomb tensor,
+                                  # increments only; no stored exact tensor needed) | 'auto': int8 with exact_k='direct'
+    surrogate_j_aux='def2-universal-jfit',
+    coarse_cache_frac=0.15,       # GPU-memory fraction for the FP32 coarse-grid AO cache; beyond it blocks are FP16
+    occ_k=True,                   # stored exact K as K C_occ (X = B C, T = C^T X, KC = X T); T reused for the gradient fit
+    exact_k='auto',               # 'stored': DF tensors in memory; 'direct': two streamed integral passes per outer;
+                                  # 'auto': direct when the stored FP64 tensors would exceed 45 % of the GPU memory
     direct_nmod=(15, 11),         # INT8-CRT moduli of the direct passes (pass 1 is amplified by J^-1); None: FP64
     inner_eig='auto',             # 'full': diagonalise every inner cycle; 'rotate': preconditioned occupied-subspace
     rotate_steps=2,               # rotation (pseudo-diagonalisation, no nao^3 step) with the stage-1 virtuals as preconditioner;
@@ -245,6 +255,46 @@ class SurrogateK:
         return 2 * (P + P.T)
 
 
+class SurrogateK8:
+    """SurrogateK on an INT8-stored tensor (df.int8_df.Int8DF): same interface, memory ~ npairs * naux bytes."""
+
+    def __init__(self, mf, auxbasis, omega, alpha, hyb):
+        from gpu4pyscf.df.int8_df import Int8DF
+        self.t = Int8DF(mf.mol, auxbasis, omega=omega if omega else None,
+                        lr_factor=alpha if omega else None, sr_factor=hyb if omega else None, bits=8, host='auto')
+        self.hyb = 1.0 if omega else hyb
+        self._built = False
+
+    def _ensure(self):
+        if not self._built:
+            self.t.build()
+            self._built = True
+
+    def k_ref(self, dm):
+        self._ensure()
+        if getattr(dm, 'mo_coeff', None) is not None:
+            occ = cupy.asarray(dm.mo_occ)
+            C = cupy.asarray(dm.mo_coeff)[:, occ > 0] * cupy.sqrt(occ[occ > 0])
+        else:
+            w, v = cupy.linalg.eigh(cupy.asarray(dm))
+            keep = w > 1e-8
+            C = v[:, keep] * cupy.sqrt(w[keep])
+        return self.hyb * self.t.k_pairs(C)
+
+    def ensure(self):
+        self._ensure()
+
+    def k_abs(self, C):
+        return 2 * self.hyb * self.t.k_pairs(C)
+
+    def set_ref(self, Cref, s1e):
+        self.Cref = Cref
+
+    def k_inc_dC(self, dC):
+        P = self.t.k_pairs(dC, self.Cref, 0.5)
+        return 2 * self.hyb * (P + P.T)
+
+
 def align_increment(Cref, C, s1e):
     """dC = C R - Cref with the rotation R of the occupied space that brings C closest to Cref (Procrustes)."""
     M = Cref.T @ (s1e @ C)
@@ -258,7 +308,7 @@ class CoarseXC:
     density increment rho = rho_ref + delta rho (delta psi = A^T dC in FP32, psi_ref in FP64), libxc in FP64 and
     delta V = Phi^T diag(u - u_ref) Phi in FP32: the rounding error scales with the increment."""
 
-    def __init__(self, ni, mol, grid, xc):
+    def __init__(self, ni, mol, grid, xc, cache_frac=None):
         self.ni, self.mol, self.grid, self.xc = ni, mol, grid, xc
         self.xctype = ni._xc_type(xc)
         assert self.xctype in ('GGA', 'MGGA')
@@ -266,9 +316,16 @@ class CoarseXC:
         self.nao = mol.nao
         self.blocks = []
         p0 = 0
+        # FP32 AO cache up to cache_frac of the GPU memory, FP16 beyond (large molecules); used as FP32 per block
+        budget = (cache_frac or 1.0) * cupy.cuda.Device().mem_info[1]
+        used = 0
         for ao, idx, weight, _ in ni.block_loop(opt._sorted_mol, grid, self.nao, 1, max_memory=None):
-            self.blocks.append((ao[:4].astype(np.float32), idx, p0, weight.size))
+            dt = np.float32 if used + ao[:4].size * 4 <= budget else np.float16
+            a = ao[:4].astype(dt)
+            used += a.nbytes
+            self.blocks.append((a, idx, p0, weight.size))
             p0 += weight.size
+        self.cache_bytes = used
         self.ng = p0
         self.w = cupy.asarray(grid.weights)
 
@@ -279,6 +336,7 @@ class CoarseXC:
         nocc = Cs.shape[1]
         psi = cupy.empty((4, self.ng, nocc), dtype=dtype)
         for A, idx, p0, ng in self.blocks:
+            A = A.astype(np.float32, copy=False)
             Cb = cupy.ascontiguousarray(Cs[idx]).astype(dtype)
             for k in range(4):
                 Ak = A[k] if dtype == np.float32 else A[k].astype(np.float64)
@@ -297,6 +355,7 @@ class CoarseXC:
         u32 = u.astype(np.float32)
         mgga = self.xctype == 'MGGA'
         for A, idx, p0, ng in self.blocks:
+            A = A.astype(np.float32, copy=False)
             ub = u32[:, p0:p0 + ng]
             B0 = 0.5 * ub[0] * A[0] + ub[1] * A[1] + ub[2] * A[2] + ub[3] * A[3]
             H = A[0] @ B0.T
@@ -474,6 +533,21 @@ def kernel(mf, dm0=None, **kwargs):
         g_in = _grid(mol, opt['inner_grid'], mf.grids)
         g_nlc1 = _grid(mol, opt['stage1_nlc_grid'], mf.nlcgrids) if with_nlc else None
         dk_fr = dk_lr = None
+        free = cupy.cuda.Device().mem_info[1]
+        if opt['exact_k'] == 'auto':
+            # stored exact tensors: FP64 over ~half of the AO pairs, one per operator (FR, and LR when range separated)
+            from pyscf.df import addons as _addons
+            naux_x = _addons.make_auxmol(mol, mf.with_df.auxbasis).nao_nr() if mf.with_df.auxbasis else 3 * mol.nao
+            stored = 8 * naux_x * mol.nao * (mol.nao + 1) / 2 * (2 if omega != 0 else 1)
+            opt['exact_k'] = 'direct' if stored > 0.45 * free else 'stored'
+        if opt['surrogate_j'] == 'auto':
+            opt['surrogate_j'] = 'int8' if opt['exact_k'] == 'direct' else 'exact'
+        if opt['surrogate_store'] == 'auto':
+            from pyscf.df import addons as _addons
+            naux_s = _addons.make_auxmol(mol, opt['surrogate_aux']).nao_nr()
+            opt['surrogate_store'] = 'int8' if 4 * naux_s * mol.nao ** 2 > 0.3 * free else 'dense'
+        log.info('multi-fidelity: exact_k=%s surrogate_store=%s surrogate_j=%s',
+                 opt['exact_k'], opt['surrogate_store'], opt['surrogate_j'])
         if opt['exact_k'] == 'direct':
             from gpu4pyscf.df.direct_k import DirectDFK
             if getattr(mf.with_df, 'auxmol', None) is None:
@@ -492,10 +566,17 @@ def kernel(mf, dm0=None, **kwargs):
         s1e = cupy.asarray(mf.get_ovlp())
         e_nuc = mf.energy_nuc()
         eig = FastEig(s1e, opt['eig'], nocc)
-        cx = CoarseXC(ni, mol, g_in, xc) if opt['coarse_xc'] == 'inc' else None
-        sk = SurrogateK(mf, opt['surrogate_aux'], omega, alpha, hyb,
-                        mode=opt['k_increment'] if opt['k_increment'] != 'exact' else 'fp32')
-    conv_tol_grad = opt['conv_tol_grad'] or 0.1 * np.sqrt(mf.conv_tol)
+        cx = CoarseXC(ni, mol, g_in, xc, opt['coarse_cache_frac']) if opt['coarse_xc'] == 'inc' else None
+        if opt['surrogate_store'] == 'int8':
+            sk = SurrogateK8(mf, opt['surrogate_aux'], omega, alpha, hyb)
+        else:
+            sk = SurrogateK(mf, opt['surrogate_aux'], omega, alpha, hyb,
+                            mode=opt['k_increment'] if opt['k_increment'] != 'exact' else 'fp32')
+        js = None
+        if opt['surrogate_j'] == 'int8':
+            from gpu4pyscf.df.int8_df import Int8DF
+            js = Int8DF(mol, opt['surrogate_j_aux'], bits=16)
+    conv_tol_grad = opt['conv_tol_grad'] or getattr(mf, 'conv_tol_grad', None) or np.sqrt(mf.conv_tol)
 
     def tagged(C_full, occ):
         D = 2 * C_full[:, occ > 0] @ C_full[:, occ > 0].T
@@ -533,6 +614,8 @@ def kernel(mf, dm0=None, **kwargs):
 
     def get_j(dm):
         with tim('J'):
+            if js is not None:
+                return js.j(dm)
             return mf.get_j(mol, dm, hermi=1)
 
     from gpu4pyscf.scf.diis import CDIIS
@@ -553,7 +636,9 @@ def kernel(mf, dm0=None, **kwargs):
         if dm.ndim == 3:
             dm = dm[0] + dm[1]
         with tim('DF build'):
-            if getattr(mf.with_df, '_cderi', None) is None:
+            if js is not None:
+                js.build()                         # INT8 surrogate J tensor (no stored exact tensor)
+            elif getattr(mf.with_df, '_cderi', None) is None:
                 mf.with_df.build()                 # exact tensor first: J then takes the fast path
         diis = new_diis()
         f = None
@@ -575,6 +660,7 @@ def kernel(mf, dm0=None, **kwargs):
             f = h1e + vj + vc1 - 0.5 * vk
             if it > 0:
                 g = orb_grad(f, C)
+                log.debug('multi-fidelity: stage 1 cycle %d |g| = %.3e', it, g)
                 if g < opt['stage1_conv_grad']:
                     break
             with tim('diis'):
@@ -591,6 +677,7 @@ def kernel(mf, dm0=None, **kwargs):
         last_inner_tol = None
         xctype = ni._xc_type(xc)
         levels = []
+        occ_t = None
         for outer in range(opt['max_outer']):
             ncyc['outer'] += 1
             Co = C[:, :nocc]
@@ -637,6 +724,20 @@ def kernel(mf, dm0=None, **kwargs):
                     if omega != 0:
                         Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False, keep_fit=True)[0]
                     Wk /= np.sqrt(2.0)
+                elif opt['occ_k']:
+                    # K(D) C_occ directly (no nao^2 K matrix); keeps T = C^T B C for the gradient fit
+                    from gpu4pyscf.df.df_jk import get_kc_occ
+                    Cw = Co * np.sqrt(2.0)
+                    kc, t_fr = get_kc_occ(mf.with_df, Cw, keep_t=True)
+                    Wk = hyb * kc
+                    t_lr = None
+                    if omega != 0:
+                        with mf.with_df.range_coulomb(omega, None, None) as d_lr:
+                            kc, t_lr = get_kc_occ(d_lr, Cw, keep_t=True, omega=omega)
+                        Wk += (alpha - hyb) * kc
+                    kc = None
+                    Wk /= np.sqrt(2.0)
+                    occ_t = (t_fr, t_lr)
                 else:
                     vk = hyb * mf.get_k(mol, dm, hermi=1)
                     if omega != 0:
@@ -661,7 +762,13 @@ def kernel(mf, dm0=None, **kwargs):
             with tim('K_s exact'):
                 vks_ref = sk.k_ref(dm)
             vc = vxc_coarse(dm)
-            W = Wt - (hc + vc - 0.5 * vks_ref) @ Co
+            if js is not None:
+                with tim('J'):
+                    vjs_ref = js.j(dm)
+                hs = h1e + vjs_ref
+            else:
+                hs = hc
+            W = Wt - (hs + vc - 0.5 * vks_ref) @ Co
             SC = s1e @ Co
             Delta = W @ SC.T + SC @ W.T - SC @ (Co.T @ W) @ SC.T
             if opt['k_increment'] != 'exact':
@@ -671,7 +778,7 @@ def kernel(mf, dm0=None, **kwargs):
                 with tim('xc_coarse set_ref'):
                     cx.set_ref(Co)
             Co_ref = Co
-            f = hc + vc - 0.5 * vks_ref + Delta
+            f = hs + vc - 0.5 * vks_ref + Delta
             Dref_tag = dm
             diis = new_diis()
             inner_tol = max(opt['inner_factor'] * gt, 0.3 * conv_tol_grad * opt['inner_factor'])
@@ -697,7 +804,12 @@ def kernel(mf, dm0=None, **kwargs):
                         vci = vc + cx.inc(dC)
                 else:
                     vci = vxc_coarse(dm)
-                f = h1e + get_j(dm) + vci - 0.5 * vks + Delta
+                if js is not None:
+                    with tim('J'):
+                        vji = vjs_ref + js.j(dm - Dref_tag)       # increment: rounding relative to D - D_ref
+                else:
+                    vji = get_j(dm)
+                f = h1e + vji + vci - 0.5 * vks + Delta
                 gs = orb_grad(f, C)
                 if gs < inner_tol:
                     break
@@ -737,6 +849,22 @@ def kernel(mf, dm0=None, **kwargs):
                 cache = {'C': Cw, 'omega': abs(omega), 'fr': dk_fr.fit_oo(Uo)}
                 if omega != 0:
                     cache['lr'] = dk_lr.fit_oo(Uo)
+            elif occ_t is not None:
+                # T = Cw^T B Cw of the last exact K: R = aux_coef T, rotated to the canonical orbitals
+                from gpu4pyscf.df.df import _decompose_j2c
+
+                def fit(dfobj, T, om):
+                    cached = getattr(dfobj.intopt, '_aux_coef_cache', None)
+                    if cached is not None and cached[0] == (abs(om or 0.), None, None) and cached[2] is not None:
+                        ac = cached[1][cupy.asarray(cached[2])]          # sorted -> native aux order
+                    else:
+                        ac = _decompose_j2c(dfobj.intopt.auxmol, None, om, None, None)[0]
+                    R = ac.dot(T.reshape(T.shape[0], -1)).reshape(-1, nocc, nocc)
+                    return cupy.einsum('ki,rkl,lj->rij', Uo, R, Uo)
+                cache = {'C': Cw, 'omega': abs(omega), 'fr': fit(mf.with_df, occ_t[0], None)}
+                if omega != 0:
+                    with mf.with_df.range_coulomb(omega, None, None) as d:
+                        cache['lr'] = fit(d, occ_t[1], omega)
             else:
                 cache = {'C': Cw, 'omega': abs(omega), 'fr': df_rhf_grad.precompute_fit_oo(mf.with_df, Cw)}
                 if omega != 0:

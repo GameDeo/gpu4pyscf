@@ -639,6 +639,9 @@ def _cholesky_eri(intopt, *, omega=None, lr_factor=None, sr_factor=None,
         cderi_idx = (pair_addresses, diag_addrs)
 
     aux_coef, tag = _decompose_j2c(auxmol, aux_sorting, omega, lr_factor, sr_factor)
+    # kept for consumers of the same metric (multi-fidelity gradient fit), in the unsorted aux order
+    intopt._aux_coef_cache = ((abs(omega if omega is not None else (auxmol.omega or 0.)), lr_factor, sr_factor),
+                              aux_coef, aux_sorting)
     if num_devices > 1:
         # cupy cannot copy non-contiguous array aux_coef[:,aux0:aux1] between
         # devices. This slicing is a contiguous array in the F-order storage.

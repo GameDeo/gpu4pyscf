@@ -41,6 +41,7 @@ __all__ = ['Gradients']
 # ~ eps32 * w_sp * |dI|.  Pairs are taken into the FP32 tier in ascending w_sp while the cumulated weight stays below
 # GRAD_TIERS['frac'] of the total (per aux batch).  None: off (FP64 for every pair).
 GRAD_TIERS = None
+TIER_GROUP_LABELS = None   # (li, lj) of each shell-pair group of the last tiered gradient (diagnostics)
 # digits of the Ozaki-I INT8 product for the pseudo-density build Gamma = C_r (Z C_l) (reduction length nocc); 0: FP64
 GAMMA_OZ1_NDIG = 0
 GAMMA_OZ1_BUDGET = 1.0e9
@@ -349,6 +350,9 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                             int(pair_batch_size[mol.uniq_l_ctr[gi, 0], mol.uniq_l_ctr[gj, 0]]))
         envs32 = _envs_f32(int3c2e_opt.int3c2e_envs)
         tier_stats = [0, 0]
+        global TIER_GROUP_LABELS
+        TIER_GROUP_LABELS = [(int(mol.uniq_l_ctr[gi, 0]), int(mol.uniq_l_ctr[gj, 0]))
+                             for gi, gj in int3c2e_opt.bas_ij_cache.keys()]
 
     int3c2e_envs = int3c2e_opt.int3c2e_envs
     kern = libvhf_rys.sum_ejk_int3c2e_ip1
@@ -392,9 +396,16 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                 cp.take(dm_tensor1.reshape(-1,dk), pair_addresses, axis=0,
                         out=compressed[:,k0:k1])
         if tiers:
-            low = _tier_split(compressed, ao_pair_loc, group_sp, tiers['frac'])
+            if 'groups' in tiers:
+                # diagnostics: whole (li, lj) groups (indices into TIER_GROUP_LABELS) in the FP32 tier
+                low = cp.zeros(len(ao_pair_loc) - 1, dtype=bool)
+                for gidx in tiers['groups']:
+                    low[group_sp[gidx][0]:group_sp[gidx][1]] = True
+            else:
+                low = _tier_split(compressed, ao_pair_loc, group_sp, tiers['frac'])
             tab_hi = _tier_tables(~low, bas_ij_idx, ao_pair_loc, group_sp, group_bs)
-            tab_lo = _tier_tables(low, bas_ij_idx, ao_pair_loc, group_sp, group_bs)
+            # 'skip': the low tier is dropped (Gamma-weighted screening) instead of evaluated in FP32
+            tab_lo = None if tiers.get('skip') else _tier_tables(low, bas_ij_idx, ao_pair_loc, group_sp, group_bs)
             tier_stats[0] += int(low.sum()); tier_stats[1] += low.size
         else:
             tab_hi, tab_lo = (bas_ij_idx, shl_pair_offsets, ao_pair_loc), None

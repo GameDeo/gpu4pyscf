@@ -707,6 +707,47 @@ def get_jk(dfobj, dms, hermi=0, with_j=True, with_k=True,
     t1 = log.timer_debug1('vj and vk', *t1)
     return vj, vk
 
+def get_kc_occ(dfobj, Cw, nmod=None, keep_t=False, omega=None):
+    '''K(D) Cw on the occupied space from the stored DF tensor, D = Cw Cw^T (Cw occupation-weighted, real).
+        X_L = B_L Cw (nao x nocc per aux function L),  T_L = Cw^T X_L,  K Cw = sum_L X_L T_L
+    The second contraction is nao * naux * nocc^2 instead of the nao^2 * naux * nocc of the full K matrix, and
+    T = Cw^T B Cw is the occupied-pair fit of the DF nuclear gradient (keep_t: also return T, rows in the loop order of
+    dfobj, as df.grad.rhf.precompute_fit_oo).  X uses INT8-CRT GEMMs with nmod moduli (None: K_CRT_MODULI when
+    K_PRECISION == 'crt', else FP64).'''
+    from gpu4pyscf.lib import crt_gemm
+    if dfobj._cderi is None:
+        dfobj.build(omega=omega)       # dfobj: the range_coulomb(omega) object for a long-range tensor
+    Cw = cp.asarray(Cw)
+    nao, nocc = Cw.shape
+    if nmod is None and K_PRECISION == 'crt':
+        nmod = K_CRT_MODULI
+    ct = cp.ascontiguousarray(Cw.T)
+    KC = cp.zeros((nao, nocc))
+    Ts = [] if keep_t else None
+    jp = (nao + 15) // 16 * 16
+    for cderi, _ in dfobj.loop(blksize=dfobj.get_blksize(mem_fraction=0.4), unpack=True):
+        nL = len(cderi)
+        sub = nL if not nmod else max(16, int(K_CRT_BUDGET / (nmod * nao * jp)) // 16 * 16)
+        for l0 in range(0, nL, sub):
+            l1 = min(nL, l0 + sub)
+            if nmod:
+                view = cderi[l0:l1].transpose(1, 0, 2)                    # [i, L, j]
+                if view.strides[1] != view.itemsize:
+                    view = cp.ascontiguousarray(cderi[l0:l1].transpose(1, 2, 0)).transpose(0, 2, 1)
+                X, P1 = crt_gemm.gemm_planes(view, ct, nmod)               # rows (i, L), cols k
+                X = X.reshape(nao, P1, nocc)[:, :l1 - l0]
+            else:
+                X = contract('Lij,jk->iLk', cderi[l0:l1], Cw)
+            T = contract('ilk,im->lkm', X, Cw)
+            contract('ilk,lkm->im', X, T, beta=1, out=KC)
+            if keep_t:
+                Ts.append(T)
+            X = None
+    if keep_t:
+        return KC, cp.concatenate(Ts, axis=0)
+    return KC
+
+
 def get_j(dfobj, dm, hermi=1):
     from gpu4pyscf.df.int3c2e_bdiv import int2c2e
     from gpu4pyscf.df import j_engine_3c2e
