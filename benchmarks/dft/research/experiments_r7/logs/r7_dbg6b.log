@@ -1,0 +1,5 @@
+cd 11 8 D 1.48e-02 D0 1.47e-02 dD 8.27e-03 D-D0 8.54e-02
+cd 11 16 D 4.53e-05 D0 4.59e-05 dD 5.03e-05 D-D0 2.19e-04
+sym 11 16 D 5.28e-05 D0 5.25e-05 dD 4.86e-05 D-D0 3.18e-04
+K host vs device max diff 9.92e-05 (max 1.02e+00)
+RUNDONE

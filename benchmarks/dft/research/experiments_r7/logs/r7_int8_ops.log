@@ -1,0 +1,9 @@
+J tensor build 2.18 s  naux 1009 npairs 161533
+J_s(D) 0.1378 s  rel err 1.48e-02
+J_s(dD) rel err 9.12e-03
+K tensor build 2.53 s
+K_s(D) 0.061 s  rel err 2.58e-03
+K_s inc 0.066 s  rel err 3.50e-03 (vs dense fp32 surrogate)
+   dense fp32 inc rel err 4.50e-06, int8 inc rel err 3.51e-03 (vs FP64 difference)
+done
+RUNDONE

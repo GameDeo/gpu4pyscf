@@ -1,0 +1,24 @@
+RESULT {'inc_store': 'f32', 'exact_k': 'direct'} dE -4.48e-10 SCF 33.40 s GRAD 6.11 s max|dg| 1.7e-07
+   cycles {'stage1': 8, 'inner': 13, 'outer': 3} outer |g| ['1.0e-02', '9.4e-05', '1.2e-06']
+     K exact                  14.09 s    3   4.697
+     xc_fine+grad              6.25 s    2   3.126
+     DF build                  1.83 s    1   1.833
+     nlc_fine                  1.75 s    3   0.582
+     xc_fine                   1.34 s    1   1.338
+     setup                     1.32 s    1   1.325
+     xc_coarse inc             1.23 s   13   0.095
+     eig                       0.94 s   21   0.045
+     K_s inc                   0.92 s   13   0.071
+     xc_coarse                 0.73 s    3   0.244
+     xc_coarse32               0.68 s    8   0.085
+     K_s stage1                0.56 s    9   0.062
+     diis                      0.37 s   21   0.018
+     nlc_coarse                0.33 s    9   0.037
+     J                         0.31 s   22   0.014
+     xc_coarse set_ref         0.25 s    2   0.127
+     K_s exact                 0.12 s    2   0.060
+     init_guess                0.07 s    1   0.074
+     grad fit_oo               0.02 s    1   0.021
+     K_s set_ref               0.00 s    2   0.000
+done
+RUNDONE

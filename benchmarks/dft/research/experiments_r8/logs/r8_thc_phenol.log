@@ -1,0 +1,33 @@
+[    0.0 s] nao 253 nocc 25
+[    0.3 s] lambda_min(S) 1.10e-05, 12 below 1e-3
+[    0.9 s] exact jkfit naux 635
+[    6.7 s] D0: surrogate SCF 8 cycles, |g_s| 8.7e-04
+[   12.1 s]    svpri+exJ outer 0: inner 7 cycles
+[   18.1 s]    svpri+exJ outer 1: inner 8 cycles
+[   40.5 s]    svpri+exJ outer 2: inner 33 cycles
+[   41.1 s] svpri+exJ      outer |g|: 1.46e-02 6.40e-05 5.76e-07 5.56e-09  ratios: 228 111 103
+[   46.6 s]    svpri+jfit outer 0: inner 7 cycles
+[   52.8 s]    svpri+jfit outer 1: inner 8 cycles
+[   70.6 s]    svpri+jfit outer 2: inner 26 cycles
+[   71.2 s] svpri+jfit     outer |g|: 1.46e-02 1.41e-04 1.38e-06 1.39e-08  ratios: 103 102 99
+[   72.3 s]   THC: 1012 K-means points from 68496 grid points, 1.1 s
+[   73.0 s]   THC ng=1012 built in 1.8 s (kept 500 of 1012 Gram eigenvalues)
+[   75.4 s]    thc1012 outer 0: inner 8 cycles
+[   78.6 s]    thc1012 outer 1: inner 10 cycles
+[   81.5 s]    thc1012 outer 2: inner 10 cycles
+[   82.1 s] thc1012        outer |g|: 1.46e-02 5.76e-04 1.69e-04 7.67e-05  ratios: 25 3 2
+[   84.2 s]    thc1012+exJ outer 0: inner 7 cycles
+[   86.7 s]    thc1012+exJ outer 1: inner 8 cycles
+[   89.4 s]    thc1012+exJ outer 2: inner 9 cycles
+[   90.1 s] thc1012+exJ    outer |g|: 1.46e-02 6.09e-04 1.34e-04 4.22e-05  ratios: 24 5 3
+[   91.0 s]   THC: 2024 K-means points from 68496 grid points, 0.9 s
+[   92.7 s]   THC ng=2024 built in 2.6 s (kept 691 of 2024 Gram eigenvalues)
+[   95.7 s]    thc2024 outer 0: inner 8 cycles
+[   99.2 s]    thc2024 outer 1: inner 9 cycles
+[  102.8 s]    thc2024 outer 2: inner 10 cycles
+[  103.4 s] thc2024        outer |g|: 1.46e-02 3.55e-04 8.61e-05 3.33e-05  ratios: 41 4 3
+[  106.1 s]    thc2024+exJ outer 0: inner 8 cycles
+[  108.4 s]    thc2024+exJ outer 1: inner 9 cycles
+[  111.0 s]    thc2024+exJ outer 2: inner 9 cycles
+[  111.7 s] thc2024+exJ    outer |g|: 1.46e-02 3.79e-04 7.93e-05 2.23e-05  ratios: 38 5 4
+[  111.7 s] done

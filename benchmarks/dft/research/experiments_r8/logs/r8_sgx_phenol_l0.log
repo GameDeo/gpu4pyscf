@@ -1,0 +1,4 @@
+[    0.0 s] nao 253 nocc 25 lambda_min(S) 1.1e-05
+[    5.4 s] D0: surrogate SCF 8 cycles
+[    6.7 s]   grid-J def2-universal-jkfit (50, 194): 85528 points, naux 635, 1.1 s
+[    9.6 s]   K sgx level 0  ov rel err: dD 2.6e-03  D0 7.8e-04

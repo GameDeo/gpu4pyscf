@@ -139,7 +139,7 @@ def scf_loop(fockfn, D, Co, tol, maxc=80):
     return D, Co, it + 1, g
 
 
-def outer_loop(name, J_s, K_s, Co, nouter=3, inner_factor=1e-3):
+def outer_loop(name, J_s, K_s, Co, nouter=3, inner_factor=float(os.environ.get('INNER', '1e-3'))):
     gs = []
     for outer in range(nouter + 1):
         Dref = 2 * Co @ Co.T

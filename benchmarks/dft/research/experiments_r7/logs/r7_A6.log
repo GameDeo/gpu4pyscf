@@ -1,0 +1,46 @@
+RESULT {'exact_k': 'direct'} dE -2.91e-10 SCF 26.77 s GRAD 5.86 s max|dg| 4.6e-07
+   cycles {'stage1': 8, 'inner': 7, 'outer': 2} outer |g| ['7.7e-03', '1.9e-05']
+     K exact                   9.31 s    2   4.654
+     J                         5.25 s   16   0.328
+     xc_fine+grad              2.96 s    1   2.955
+     K_s stage1                1.89 s    9   0.210
+     setup                     1.46 s    1   1.457
+     xc_fine                   1.23 s    1   1.225
+     nlc_fine                  1.06 s    2   0.530
+     eig                       0.60 s   15   0.040
+     xc_coarse32               0.58 s    8   0.072
+     xc_coarse inc             0.50 s    7   0.072
+     xc_coarse                 0.49 s    2   0.244
+     nlc_coarse                0.34 s    9   0.038
+     K_s inc                   0.28 s    7   0.040
+     K_s exact                 0.20 s    1   0.204
+     diis                      0.20 s   15   0.014
+     xc_coarse set_ref         0.13 s    1   0.128
+     init_guess                0.07 s    1   0.070
+     K_s set_ref               0.02 s    1   0.021
+     grad fit_oo               0.02 s    1   0.020
+     DF build                  0.00 s    1   0.000
+RESULT {'inc_store': 'f32', 'exact_k': 'direct', 'surrogate_host': True} dE -4.99e-10 SCF 37.75 s GRAD 6.15 s max|dg| 1.7e-07
+   cycles {'stage1': 8, 'inner': 13, 'outer': 3} outer |g| ['1.0e-02', '9.6e-05', '1.3e-06']
+     K exact                  14.00 s    3   4.667
+     xc_fine+grad              6.21 s    2   3.107
+     DF build                  3.84 s    1   3.839
+     J                         2.67 s   22   0.121
+     nlc_fine                  1.66 s    3   0.554
+     K_s inc                   1.57 s   13   0.121
+     xc_fine                   1.30 s    1   1.295
+     K_s stage1                1.06 s    9   0.117
+     xc_coarse inc             0.99 s   13   0.076
+     setup                     0.96 s    1   0.962
+     eig                       0.85 s   21   0.040
+     xc_coarse                 0.60 s    3   0.199
+     xc_coarse32               0.56 s    8   0.071
+     diis                      0.29 s   21   0.014
+     K_s exact                 0.26 s    2   0.131
+     xc_coarse set_ref         0.26 s    2   0.128
+     nlc_coarse                0.25 s    9   0.028
+     init_guess                0.17 s    1   0.173
+     grad fit_oo               0.02 s    1   0.022
+     K_s set_ref               0.00 s    2   0.000
+done
+RUNDONE

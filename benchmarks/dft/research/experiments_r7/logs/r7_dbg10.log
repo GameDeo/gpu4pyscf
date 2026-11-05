@@ -1,0 +1,7 @@
+crt frac 0.25 nmod 11 max|dB| 1.373e-05
+crt frac 0.25 nmod 15 max|dB| 0.000e+00
+crt frac 0.02 nmod 11 max|dB| 1.373e-05
+crt frac 0.02 nmod 15 max|dB| 0.000e+00
+crt frac 0.002 nmod 11 max|dB| 1.373e-05
+crt frac 0.002 nmod 15 max|dB| 0.000e+00
+RUNDONE

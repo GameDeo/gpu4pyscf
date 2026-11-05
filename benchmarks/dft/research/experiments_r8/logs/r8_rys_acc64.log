@@ -1,0 +1,30 @@
+RESULT mf default dE 2.00e-10  SCF 14.17 s  GRAD 5.55 s  total 19.73 s  max|dg| 4.7e-07
+   cycles {'stage1': 8, 'inner': 7, 'outer': 2} outer |g| ['7.7e-03', '1.9e-05']
+     xc_fine+grad              2.70 s    1   2.699
+     K exact                   1.99 s    2   0.993
+     K_s stage1                1.84 s    9   0.205
+     xc_fine                   1.13 s    1   1.129
+     DF build                  1.08 s    1   1.084
+     nlc_fine                  0.94 s    2   0.471
+     eig                       0.63 s   15   0.042
+     setup                     0.58 s    1   0.585
+     J                         0.51 s   16   0.032
+     xc_coarse32               0.50 s    8   0.063
+     xc_coarse inc             0.42 s    7   0.060
+     xc_coarse                 0.35 s    2   0.173
+     K_s inc                   0.28 s    7   0.040
+     diis                      0.21 s   15   0.014
+     K_s exact                 0.21 s    1   0.209
+     nlc_coarse                0.20 s    9   0.023
+     grad fit_oo               0.15 s    1   0.153
+     xc_coarse set_ref         0.12 s    1   0.117
+     J exact                   0.08 s    2   0.039
+     init_guess                0.06 s    1   0.061
+     K_s set_ref               0.02 s    1   0.020
+FP64 tier only: grad 6.00 s  DF_JK 4.67 s  max|dg| vs ref 4.8e-07
+TIERS {'frac': 0.01}                           grad 5.55 s  DF_JK 4.23 s (fp64 4.67)  extra max|dg| 7.5e-09  vs ref 4.7e-07
+TIERS {'frac': 0.1}                            grad 4.55 s  DF_JK 3.22 s (fp64 4.67)  extra max|dg| 1.6e-07  vs ref 4.8e-07
+TIERS {'frac': 0.3}                            grad 4.02 s  DF_JK 2.69 s (fp64 4.67)  extra max|dg| 7.1e-07  vs ref 7.7e-07
+TIERS {'frac': 1.0}                            grad 3.55 s  DF_JK 2.23 s (fp64 4.67)  extra max|dg| 6.2e-06  vs ref 5.8e-06
+done
+RUNDONE

@@ -1,0 +1,13 @@
+none CDERI fp64 15
+  J tag dm rel 4.53e-05
+  K tag dm rel 2.59e-03   host False
+  K abs rel 2.57e-03
+  dense k_abs vs k_ref rel 9.54e-06
+  sym check J 0.00e+00 K 0.00e+00
+crt CDERI crt 15
+  J tag dm rel 4.53e-05
+  K tag dm rel 2.57e-03   host False
+  K abs rel 2.46e-03
+  dense k_abs vs k_ref rel 9.54e-06
+  sym check J 0.00e+00 K 0.00e+00
+RUNDONE

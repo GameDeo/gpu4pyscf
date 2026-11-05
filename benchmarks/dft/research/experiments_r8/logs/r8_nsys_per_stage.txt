@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/content/src/gpu4pyscf/benchmarks/dft/research/experiments_r6/r6_nsys_per_stage.py", line 10, in <module>
+    src = open('/home/user/gpu4pyscf/benchmarks/dft/research/experiments_r6/r6_nsys_analyze.py').read()
+          ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/user/gpu4pyscf/benchmarks/dft/research/experiments_r6/r6_nsys_analyze.py'

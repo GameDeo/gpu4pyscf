@@ -1,0 +1,14 @@
+start                        J err 4.59e-05
+mf.build                     J err 4.59e-05
+grids                        J err 4.59e-05
+nlcgrids                     J err 4.59e-05
+ni.build                     J err 4.59e-05
+_grid                        J err 4.59e-05
+hcore/ovlp                   J err 4.59e-05
+FastEig                      J err 4.59e-05
+CoarseXC                     J err 4.59e-05
+in ctx                       J err 4.59e-05
+nr_rks coarse                J err 4.59e-05
+exact DF build               J err 4.59e-05
+get_j                        J err 4.59e-05
+RUNDONE

@@ -1,0 +1,102 @@
+==================== {'surrogate_store': 'int8', 'max_stage1': 15, 'max_outer': 3, 'max_inner': 15}
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+small_rho_cutoff = 0
+<class 'gpu4pyscf.df.df_jk.DFRKS'> does not have attributes  mixed_precision multifidelity
+multi-fidelity: exact_k=stored surrogate_store=int8 surrogate_j=exact
+Initial guess from minao
+multi-fidelity: stage 1 cycle 1 |g| = 4.440e+05
+multi-fidelity: stage 1 cycle 2 |g| = 4.444e+05
+multi-fidelity: stage 1 cycle 3 |g| = 4.440e+05
+multi-fidelity: stage 1 cycle 4 |g| = 4.430e+05
+multi-fidelity: stage 1 cycle 5 |g| = 4.430e+05
+multi-fidelity: stage 1 cycle 6 |g| = 4.431e+05
+multi-fidelity: stage 1 cycle 7 |g| = 4.437e+05
+multi-fidelity: stage 1 cycle 8 |g| = 4.443e+05
+multi-fidelity: stage 1 cycle 9 |g| = 4.101e+04
+multi-fidelity: stage 1 cycle 10 |g| = 9.672e+02
+multi-fidelity: stage 1 cycle 11 |g| = 2.667e+01
+multi-fidelity: stage 1 cycle 12 |g| = 5.828e+00
+multi-fidelity: stage 1 cycle 13 |g| = 1.676e+00
+multi-fidelity: stage 1 cycle 14 |g| = 1.005e+00
+multi-fidelity: stage 1 15 cycles, |g| = 1.00e+00
+multi-fidelity: outer 0 (exact)  E = 222.257071753217  |g| = 2.184e+01
+    inner cycles 15  |g_s| = 2.62e+01
+multi-fidelity: outer 1 (exact)  E = -359.470043081315  |g| = 2.621e+01
+    inner cycles 15  |g_s| = 4.26e+00
+multi-fidelity: outer 2 (exact)  E = 222.257351718993  |g| = 2.184e+01
+    inner cycles 15  |g_s| = 2.06e+01
+multi-fidelity SCF: E = 222.257351718993  converged = False  outer 3 inner 45 stage1 15
+    CPU time for SCF                                                    22.66 sec, wall time     22.99 sec, GPU time  22989.80 ms
+SCF not converged.
+SCF energy = 222.257351718993
+E 222.25735171899328 outer ['2.2e+01', '2.6e+01', '2.2e+01']
+==================== {'surrogate_j': 'int8', 'max_stage1': 15, 'max_outer': 3, 'max_inner': 15}
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+small_rho_cutoff = 0
+multi-fidelity: exact_k=stored surrogate_store=dense surrogate_j=int8
+Initial guess from minao
+multi-fidelity: stage 1 cycle 1 |g| = 3.148e+01
+multi-fidelity: stage 1 cycle 2 |g| = 2.111e+01
+multi-fidelity: stage 1 cycle 3 |g| = 2.771e+00
+multi-fidelity: stage 1 cycle 4 |g| = 3.058e+00
+multi-fidelity: stage 1 cycle 5 |g| = 1.285e+00
+multi-fidelity: stage 1 cycle 6 |g| = 3.972e-01
+multi-fidelity: stage 1 cycle 7 |g| = 2.810e-01
+multi-fidelity: stage 1 cycle 8 |g| = 8.741e-02
+multi-fidelity: stage 1 cycle 9 |g| = 8.216e-02
+multi-fidelity: stage 1 cycle 10 |g| = 7.479e-02
+multi-fidelity: stage 1 cycle 11 |g| = 7.060e-02
+multi-fidelity: stage 1 cycle 12 |g| = 6.812e-02
+multi-fidelity: stage 1 cycle 13 |g| = 6.340e-02
+multi-fidelity: stage 1 cycle 14 |g| = 4.734e-02
+multi-fidelity: stage 1 15 cycles, |g| = 4.73e-02
+multi-fidelity: outer 0 (exact)  E = -723.285810882245  |g| = 3.421e+00
+    inner cycles 15  |g_s| = 3.33e+01
+multi-fidelity: outer 1 (exact)  E = -542.331869188213  |g| = 1.971e+01
+    inner cycles 15  |g_s| = 8.36e-02
+multi-fidelity: outer 2 (exact)  E = -722.159292116500  |g| = 3.954e+00
+    inner cycles 15  |g_s| = 1.07e+01
+multi-fidelity SCF: E = -722.159292116500  converged = False  outer 3 inner 45 stage1 15
+    CPU time for SCF                                                    23.33 sec, wall time     24.29 sec, GPU time  24292.12 ms
+SCF not converged.
+SCF energy = -722.1592921165
+E -722.1592921165004 outer ['3.4e+00', '2.0e+01', '4.0e+00']
+RUNDONE
