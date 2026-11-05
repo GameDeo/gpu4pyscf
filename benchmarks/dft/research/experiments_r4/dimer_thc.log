@@ -1,0 +1,102 @@
+== thc:2
+nao 86 naux 226 NP 172 (c=2.0) cand 23856 THC build 1.7s
+stage1 cycles 8
+  THC K rel err 2.99e-01  dE_K 5.50e-01
+OUTER 0: |g_true|=1.99e+00
+    inner cycles 4  |g_s|=1.9e-02
+OUTER 1: |g_true|=1.47e-01
+    inner cycles 5  |g_s|=4.3e-04
+OUTER 2: |g_true|=1.87e-02
+    inner cycles 4  |g_s|=1.3e-04
+OUTER 3: |g_true|=3.63e-03
+    inner cycles 4  |g_s|=2.0e-05
+OUTER 4: |g_true|=1.01e-03
+    inner cycles 4  |g_s|=5.1e-06
+OUTER 5: |g_true|=3.26e-04
+    inner cycles 4  |g_s|=1.9e-06
+OUTER 6: |g_true|=1.15e-04
+    inner cycles 4  |g_s|=6.3e-07
+OUTER 7: |g_true|=4.29e-05
+    inner cycles 4  |g_s|=2.1e-07
+OUTER 8: |g_true|=1.65e-05
+    inner cycles 4  |g_s|=7.1e-08
+OUTER 9: |g_true|=6.43e-06
+    inner cycles 4  |g_s|=2.5e-08
+OUTER 10: |g_true|=2.54e-06
+    inner cycles 4  |g_s|=9.5e-09
+OUTER 11: |g_true|=1.01e-06
+    inner cycles 6  |g_s|=6.4e-09
+OUTER 12: |g_true|=4.01e-07
+    inner cycles 4  |g_s|=3.2e-09
+OUTER 13: |g_true|=1.61e-07
+    inner cycles 4  |g_s|=1.4e-09
+OUTER 14: |g_true|=6.46e-08
+RESULT thc:2 NP 172 outer_hist ['2.0e+00', '1.5e-01', '1.9e-02', '3.6e-03', '1.0e-03', '3.3e-04', '1.2e-04', '4.3e-05', '1.6e-05', '6.4e-06', '2.5e-06', '1.0e-06', '4.0e-07', '1.6e-07', '6.5e-08'] counts {'fineXC': 15, 'coarseXC': 81, 'Kexact_full': 0, 'Kexact_occ': 15, 'Kthc': 67}
+== thc:4
+nao 86 naux 226 NP 344 (c=4.0) cand 23856 THC build 2.7s
+stage1 cycles 8
+  THC K rel err 4.36e-02  dE_K -4.51e-03
+OUTER 0: |g_true|=3.94e-01
+    inner cycles 4  |g_s|=1.7e-03
+OUTER 1: |g_true|=9.47e-02
+    inner cycles 4  |g_s|=2.9e-04
+OUTER 2: |g_true|=1.44e-02
+    inner cycles 4  |g_s|=6.1e-05
+OUTER 3: |g_true|=3.24e-03
+    inner cycles 4  |g_s|=1.7e-05
+OUTER 4: |g_true|=7.92e-04
+    inner cycles 4  |g_s|=4.9e-06
+OUTER 5: |g_true|=2.31e-04
+    inner cycles 4  |g_s|=1.5e-06
+OUTER 6: |g_true|=7.40e-05
+    inner cycles 4  |g_s|=4.7e-07
+OUTER 7: |g_true|=2.52e-05
+    inner cycles 4  |g_s|=1.6e-07
+OUTER 8: |g_true|=8.82e-06
+    inner cycles 4  |g_s|=5.7e-08
+OUTER 9: |g_true|=3.15e-06
+    inner cycles 4  |g_s|=2.1e-08
+OUTER 10: |g_true|=1.14e-06
+    inner cycles 6  |g_s|=5.2e-09
+OUTER 11: |g_true|=4.17e-07
+    inner cycles 8  |g_s|=3.9e-09
+OUTER 12: |g_true|=1.56e-07
+    inner cycles 11  |g_s|=9.0e-10
+OUTER 13: |g_true|=5.79e-08
+RESULT thc:4 NP 344 outer_hist ['3.9e-01', '9.5e-02', '1.4e-02', '3.2e-03', '7.9e-04', '2.3e-04', '7.4e-05', '2.5e-05', '8.8e-06', '3.1e-06', '1.1e-06', '4.2e-07', '1.6e-07', '5.8e-08'] counts {'fineXC': 14, 'coarseXC': 86, 'Kexact_full': 0, 'Kexact_occ': 14, 'Kthc': 73}
+== thc:8
+nao 86 naux 226 NP 688 (c=8.0) cand 23856 THC build 6.5s
+stage1 cycles 8
+  THC K rel err 2.36e-03  dE_K -2.26e-03
+OUTER 0: |g_true|=2.47e-02
+    inner cycles 5  |g_s|=1.7e-04
+OUTER 1: |g_true|=3.75e-03
+    inner cycles 6  |g_s|=1.1e-05
+OUTER 2: |g_true|=4.83e-04
+    inner cycles 5  |g_s|=2.6e-06
+OUTER 3: |g_true|=1.15e-04
+    inner cycles 6  |g_s|=3.9e-07
+OUTER 4: |g_true|=2.06e-05
+    inner cycles 5  |g_s|=1.2e-07
+OUTER 5: |g_true|=4.51e-06
+    inner cycles 6  |g_s|=1.1e-08
+OUTER 6: |g_true|=8.99e-07
+    inner cycles 5  |g_s|=8.4e-09
+OUTER 7: |g_true|=1.93e-07
+    inner cycles 16  |g_s|=1.9e-09
+OUTER 8: |g_true|=4.04e-08
+RESULT thc:8 NP 688 outer_hist ['2.5e-02', '3.8e-03', '4.8e-04', '1.1e-04', '2.1e-05', '4.5e-06', '9.0e-07', '1.9e-07', '4.0e-08'] counts {'fineXC': 9, 'coarseXC': 70, 'Kexact_full': 0, 'Kexact_occ': 9, 'Kthc': 62}
+== thc16:4
+nao 86 naux 226 NP 344 (c=4.0) cand 23856 THC build 2.5s
+stage1 cycles 8
+  THC K rel err 4.36e-02  dE_K -4.51e-03
+OUTER 0: |g_true|=3.94e-01
+    inner cycles 4  |g_s|=1.7e-03
+OUTER 1: |g_true|=9.47e-02
+    inner cycles 4  |g_s|=2.9e-04
+OUTER 2: |g_true|=1.44e-02
+    inner cycles 4  |g_s|=6.1e-05
+OUTER 3: |g_true|=3.24e-03
+    inner cycles 4  |g_s|=1.7e-05
+OUTER 4: |g_true|=7.92e-04
+    inner cycles 4  |g_s|=4.9e-06

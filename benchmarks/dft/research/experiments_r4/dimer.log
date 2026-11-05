@@ -1,0 +1,100 @@
+== full
+nao 86 naux None
+stage1 cycles 8 g 1.5e-04
+OUTER 0: |g_true|=1.11e-02
+    it 0 |g_s|=7.1e-03 dD max 1.0e-03 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.2e-04 dD max 8.2e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=5.5e-05 dD max 8.4e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 1: |g_true|=5.82e-05
+    it 0 |g_s|=5.3e-05 dD max 1.1e-05 r(1e-1)=16 r(1e-2)=18 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.6e-06 dD max 1.3e-05 r(1e-1)=14 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=3.8e-07 dD max 1.4e-05 r(1e-1)=14 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 2: |g_true|=4.18e-07
+    it 0 |g_s|=3.2e-07 dD max 1.3e-07 r(1e-1)=16 r(1e-2)=18 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=2.4e-08 dD max 2.0e-07 r(1e-1)=10 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    it 6 |g_s|=3.4e-09 dD max 2.1e-07 r(1e-1)=8 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    inner cycles 7
+OUTER 3: |g_true|=3.58e-09
+RESULT full outer_hist ['1.1e-02', '5.8e-05', '4.2e-07', '3.6e-09'] counts {'fineXC': 4, 'coarseXC': 26, 'nlc_fine': 4, 'nlc_coarse': 8, 'Kexact': 27, 'Kcheap': 0, 'K_lr_rank_sum': 0} stage1 {'fineXC': 0, 'coarseXC': 8, 'nlc_fine': 0, 'nlc_coarse': 8, 'Kexact': 8, 'Kcheap': 0, 'K_lr_rank_sum': 0}
+== occ
+nao 86 naux None
+stage1 cycles 8 g 1.5e-04
+OUTER 0: |g_true|=1.11e-02
+    it 0 |g_s|=7.1e-03 dD max 1.0e-03 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.2e-04 dD max 8.2e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=5.5e-05 dD max 8.4e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 1: |g_true|=5.95e-05
+    it 0 |g_s|=5.3e-05 dD max 9.6e-06 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.6e-06 dD max 1.1e-05 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=5.4e-07 dD max 1.1e-05 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 2: |g_true|=5.49e-07
+    it 0 |g_s|=4.7e-07 dD max 1.2e-07 r(1e-1)=16 r(1e-2)=18 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=2.3e-08 dD max 1.8e-07 r(1e-1)=14 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    it 5 |g_s|=4.8e-09 dD max 1.9e-07 r(1e-1)=12 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    inner cycles 6
+OUTER 3: |g_true|=4.21e-09
+RESULT occ outer_hist ['1.1e-02', '5.9e-05', '5.5e-07', '4.2e-09'] counts {'fineXC': 4, 'coarseXC': 25, 'nlc_fine': 4, 'nlc_coarse': 8, 'Kexact': 26, 'Kcheap': 0, 'K_lr_rank_sum': 0} stage1 {'fineXC': 0, 'coarseXC': 8, 'nlc_fine': 0, 'nlc_coarse': 8, 'Kexact': 8, 'Kcheap': 0, 'K_lr_rank_sum': 0}
+== occK
+nao 86 naux None
+stage1 cycles 8 g 1.5e-04
+OUTER 0: |g_true|=1.11e-02
+    it 0 |g_s|=7.1e-03 dD max 1.0e-03 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.2e-04 dD max 8.2e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=5.5e-05 dD max 8.4e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 1: |g_true|=5.93e-05
+    it 0 |g_s|=5.4e-05 dD max 9.7e-06 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.6e-06 dD max 1.1e-05 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=5.5e-07 dD max 1.1e-05 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 2: |g_true|=5.56e-07
+    it 0 |g_s|=4.8e-07 dD max 1.2e-07 r(1e-1)=16 r(1e-2)=18 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=2.3e-08 dD max 1.8e-07 r(1e-1)=14 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    it 5 |g_s|=4.7e-09 dD max 1.9e-07 r(1e-1)=12 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    inner cycles 6
+OUTER 3: |g_true|=4.14e-09
+RESULT occK outer_hist ['1.1e-02', '5.9e-05', '5.6e-07', '4.1e-09'] counts {'fineXC': 4, 'coarseXC': 25, 'nlc_fine': 4, 'nlc_coarse': 8, 'Kexact': 4, 'Kcheap': 25, 'K_lr_rank_sum': 0} stage1 {'fineXC': 0, 'coarseXC': 8, 'nlc_fine': 0, 'nlc_coarse': 8, 'Kexact': 0, 'Kcheap': 8, 'K_lr_rank_sum': 0}
+== lrK:1e-1
+nao 86 naux None
+stage1 cycles 8 g 1.5e-04
+OUTER 0: |g_true|=1.11e-02
+    it 0 |g_s|=7.1e-03 dD max 1.0e-03 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.4e-04 dD max 8.2e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=6.4e-05 dD max 8.4e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 1: |g_true|=1.41e-04
+    it 0 |g_s|=6.1e-05 dD max 1.1e-05 r(1e-1)=20 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=2.3e-06 dD max 1.2e-05 r(1e-1)=18 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=8.1e-07 dD max 1.2e-05 r(1e-1)=18 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 2: |g_true|=1.28e-06
+    it 0 |g_s|=6.5e-07 dD max 2.3e-07 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=5.4e-08 dD max 3.5e-07 r(1e-1)=10 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    it 5 |g_s|=7.5e-09 dD max 3.8e-07 r(1e-1)=10 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    inner cycles 6
+OUTER 3: |g_true|=3.87e-08
+RESULT lrK:1e-1 outer_hist ['1.1e-02', '1.4e-04', '1.3e-06', '3.9e-08'] counts {'fineXC': 4, 'coarseXC': 25, 'nlc_fine': 4, 'nlc_coarse': 8, 'Kexact': 12, 'Kcheap': 0, 'K_lr_rank_sum': 210} stage1 {'fineXC': 0, 'coarseXC': 8, 'nlc_fine': 0, 'nlc_coarse': 8, 'Kexact': 8, 'Kcheap': 0, 'K_lr_rank_sum': 0}
+== lrK:1e-2
+nao 86 naux None
+stage1 cycles 8 g 1.5e-04
+OUTER 0: |g_true|=1.11e-02
+    it 0 |g_s|=7.1e-03 dD max 1.0e-03 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.2e-04 dD max 8.2e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=5.5e-05 dD max 8.4e-04 r(1e-1)=16 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 1: |g_true|=5.82e-05
+    it 0 |g_s|=5.3e-05 dD max 1.1e-05 r(1e-1)=16 r(1e-2)=18 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=1.6e-06 dD max 1.3e-05 r(1e-1)=14 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    it 3 |g_s|=3.8e-07 dD max 1.4e-05 r(1e-1)=14 r(1e-2)=20 r(1e-3)=20 r(1e-4)=20
+    inner cycles 4
+OUTER 2: |g_true|=4.18e-07
+    it 0 |g_s|=3.2e-07 dD max 1.3e-07 r(1e-1)=16 r(1e-2)=18 r(1e-3)=20 r(1e-4)=20
+    it 2 |g_s|=2.4e-08 dD max 2.0e-07 r(1e-1)=10 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    it 6 |g_s|=3.3e-09 dD max 2.1e-07 r(1e-1)=8 r(1e-2)=16 r(1e-3)=20 r(1e-4)=20
+    inner cycles 7
+OUTER 3: |g_true|=4.00e-09
+RESULT lrK:1e-2 outer_hist ['1.1e-02', '5.8e-05', '4.2e-07', '4.0e-09'] counts {'fineXC': 4, 'coarseXC': 26, 'nlc_fine': 4, 'nlc_coarse': 8, 'Kexact': 12, 'Kcheap': 0, 'K_lr_rank_sum': 272} stage1 {'fineXC': 0, 'coarseXC': 8, 'nlc_fine': 0, 'nlc_coarse': 8, 'Kexact': 8, 'Kcheap': 0, 'K_lr_rank_sum': 0}
