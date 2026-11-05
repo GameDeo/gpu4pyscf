@@ -932,11 +932,14 @@ def kernel(mf, dm0=None, **kwargs):
                     with mf.with_df.range_coulomb(omega, None, None) as d:
                         cache['lr'] = df_rhf_grad.precompute_fit_oo(d, Cw, omega=omega)
             df_rhf_grad.FIT_OO_CACHE = cache
-    # host-streamed surrogate tensors live in cupy's pinned pool, which keeps freed blocks: return them to the OS
-    # (tens of GB at Taxol size; the gradient needs that host memory)
+    # host-streamed surrogate tensors live in a pinned pool, which keeps freed blocks: return them to the OS
+    # (tens of GB at Taxol size; the gradient needs that host memory).  gpu4pyscf installs its own pool as cupy's
+    # pinned allocator (lib.cupy_helper.pinned_memory_pool); cupy's default pool is a different object.
     sk = sk8 = js = None
     import gc
+    from gpu4pyscf.lib import cupy_helper as _ch
     gc.collect()
+    _ch.pinned_memory_pool.free_all_blocks()
     cupy.get_default_pinned_memory_pool().free_all_blocks()
     mf.converged = hist[-1][0] < conv_tol_grad and levels[-1] == 'exact'
     mf.multifidelity_stats = dict(cycles=ncyc, outer_hist=hist, timers=tim.t, levels=levels,
