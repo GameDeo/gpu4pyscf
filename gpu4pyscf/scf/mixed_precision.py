@@ -77,6 +77,10 @@ DEFAULTS = {
     'crt_moduli_coarse': 8,       # INT8 moduli (K and XC) in the coarse stage: ~1e-6 relative accuracy
     'crt_moduli_final': 11,       # ... in the final stage: ~3e-10
     'crt_moduli_cderi': 15,       # DF-tensor build GEMM (aux-metric transform): static, so always accurate (~1e-12)
+    'grad_gamma_ndig': 6,         # DF J/K gradient: pseudo-density build Gamma = C (Z C^T) as Ozaki-I INT8 product
+                                  # (reduction length nocc; 6 digits ~ 41 bits; BPA: 1.07 -> 0.4 s, gradient unchanged)
+    'grad_fp32_frac': 0.01,       # ... and the shell pairs carrying the smallest 1 % of the |Gamma| weight in the FP32 copy
+                                  # of the Rys derivative kernel (FP32 error ~2.5e-5 per 1 % weight on BPA; 0 = off)
     'final_vv10': 'fp32',         # VV10 precision in the final stage of the 'crt' scheme (FP32 error ~1e-9 in E)
     'k_precision': None,          # DF-K GEMMs: 'fp32' | 'tf32x3'; None -> auto by GPU generation
     'xc_precision': None,         # XC grid GEMMs (rho, vmat): same choices
@@ -314,11 +318,15 @@ def grad_stage(mf):
     from gpu4pyscf.grad import rks as rks_grad
     from gpu4pyscf.dft import numint
     from gpu4pyscf.df.grad import rhf as df_rhf_grad
-    old = rks_grad.XC_GRAD_CRT_MODULI, numint.VV10_PRECISION, df_rhf_grad.JK_GRAD_CRT_MODULI
+    old = (rks_grad.XC_GRAD_CRT_MODULI, numint.VV10_PRECISION, df_rhf_grad.JK_GRAD_CRT_MODULI,
+           df_rhf_grad.GAMMA_OZ1_NDIG, df_rhf_grad.GRAD_TIERS)
+    df_rhf_grad.GAMMA_OZ1_NDIG = opt['grad_gamma_ndig'] or 0
+    df_rhf_grad.GRAD_TIERS = {'frac': opt['grad_fp32_frac']} if opt['grad_fp32_frac'] else None
     rks_grad.XC_GRAD_CRT_MODULI = opt['crt_moduli_final']
     numint.VV10_PRECISION = opt['final_vv10']        # the NLC gradient uses the SCF's final VV10 precision
     df_rhf_grad.JK_GRAD_CRT_MODULI = opt['crt_moduli_final'] if opt.get('jk_grad_crt', False) else 0   # off: slower and the J^-1 metric amplifies the 11-moduli error (5e-6 Eh/bohr on BPA)
     try:
         yield
     finally:
-        rks_grad.XC_GRAD_CRT_MODULI, numint.VV10_PRECISION, df_rhf_grad.JK_GRAD_CRT_MODULI = old
+        (rks_grad.XC_GRAD_CRT_MODULI, numint.VV10_PRECISION, df_rhf_grad.JK_GRAD_CRT_MODULI,
+         df_rhf_grad.GAMMA_OZ1_NDIG, df_rhf_grad.GRAD_TIERS) = old

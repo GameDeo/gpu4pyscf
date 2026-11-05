@@ -638,7 +638,14 @@ def nr_rks_vco(ni, mol, grids, xc_code, mo_coeff, mo_occ, with_grad=False, group
                             (Y, c4, u, np.int64(c4.shape[1]), np.int64(nocc), np.int64(ng), np.int64(nq),
                              np.int64(p0 - q0), np.int32(mode)))
             a3 = ao[None] if ao.ndim == 2 else ao[:ncomp]
-            if crt:
+            if crt and ncomp * ng <= crt_gemm.MAX_K:
+                # Y quantised once for V C and the three gradient products; AO components selected by index map
+                q = crt_gemm.plan(ncomp * ng, XC_CRT_MODULI)
+                oY = crt_gemm.Operand(Y, XC_CRT_MODULI, q)
+                a_src = ao if ao.ndim == 3 else ao[None]
+                out = cupy.empty((a_src.shape[1], nocc))
+                crt_gemm.matmul_operands(crt_gemm.Operand(a_src, XC_CRT_MODULI, q, comps=tuple(range(ncomp))), oY, out)
+            elif crt:
                 out = crt_gemm.gemm_nt(cupy.ascontiguousarray(a3), Y, XC_CRT_MODULI)
             else:
                 out = cupy.einsum('kig,kag->ia', a3, Y)
@@ -646,20 +653,23 @@ def nr_rks_vco(ni, mol, grids, xc_code, mo_coeff, mo_occ, with_grad=False, group
             if with_grad:
                 cp_sub = cpos[idx]
                 for n in range(3):
-                    dA = ao[list(dcomp[n])]
-                    if crt:
-                        gn = crt_gemm.gemm_nt(dA, Y, XC_CRT_MODULI)
+                    if crt and ncomp * ng <= crt_gemm.MAX_K:
+                        gn = cupy.empty_like(out)
+                        crt_gemm.matmul_operands(crt_gemm.Operand(ao, XC_CRT_MODULI, q, comps=dcomp[n]), oY, gn)
+                    elif crt:
+                        gn = crt_gemm.gemm_nt(ao[list(dcomp[n])], Y, XC_CRT_MODULI)
                     else:
-                        gn = cupy.einsum('kig,kag->ia', dA, Y)
+                        gn = cupy.einsum('kig,kag->ia', ao[list(dcomp[n])], Y)
                     exc1_ao[idx, n] += (gn * cp_sub).sum(axis=1)
         group.clear()
 
     gbytes = 0
     p0 = 0
-    for ao, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, 2 if with_grad else ao_deriv, max_memory=None):
+    for ao, idx, weight, _ in _block_loop(ni, _sorted_mol, grids, nao, 2 if with_grad else ao_deriv,
+                                          max_memory=None, fresh_buf=True):
         ng = weight.size
         c4 = _half_transform(ao, cupy.ascontiguousarray(cpos[idx]), xctype, crt)
-        aoc = ao.copy()                     # block_loop reuses its buffer
+        aoc = ao                            # own buffer per block (fresh_buf)
         group.append((aoc, idx, c4, p0, ng))
         gbytes += aoc.nbytes + c4.nbytes
         p0 += ng
@@ -2573,7 +2583,7 @@ def _grid_block_views(grids):
     return views
 
 def _block_loop(ni, mol, grids, nao=None, deriv=0, max_memory=2000,
-                non0tab=None, blksize=None, buf=None, extra=0, grid_range=None):
+                non0tab=None, blksize=None, buf=None, extra=0, grid_range=None, fresh_buf=False):
     '''
     Generator loops over grids block-by-block.
     Kwargs:
@@ -2583,6 +2593,7 @@ def _block_loop(ni, mol, grids, nao=None, deriv=0, max_memory=2000,
         blksize: if not given, it will be estimated with avail GPU memory.
         buf: dummy argument for compatibility with PySCF
         grid_range: loop [grid_start, grid_end] in grids only. Both values has to be multiple of MIN_BLK_SIZE.
+        fresh_buf: every block gets its own AO array (the caller may keep it); default: one reused buffer.
     '''
     log = logger.new_logger(mol)
     if grids.coords is None:
@@ -2642,7 +2653,8 @@ def _block_loop(ni, mol, grids, nao=None, deriv=0, max_memory=2000,
             screening_info=(nao_sub, non0shl_idx, ao_loc_slice, ctr_offsets_slice),
             gdftopt=opt,
             transpose=False,
-            out=cupy.ndarray((comp,nao_sub,coords.shape[0]), memptr=buf_ptr))
+            out=(cupy.empty((comp,nao_sub,coords.shape[0])) if fresh_buf else
+                 cupy.ndarray((comp,nao_sub,coords.shape[0]), memptr=buf_ptr)))
 
         if pad > 0:
             if deriv == 0:

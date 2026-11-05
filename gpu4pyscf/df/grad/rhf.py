@@ -34,6 +34,90 @@ from gpu4pyscf.scf.jk import _check_rsh_factors
 
 __all__ = ['Gradients']
 
+# ------------------------------------------------------------------ Gamma-weighted precision tiers
+# The DF J/K gradient contracts the derivative 3c integrals with the pseudo-density Gamma (known before the kernel
+# runs).  Shell pairs whose Gamma weight w_sp = sum_{rows of sp, aux} |Gamma| is small contribute little; their
+# derivative integrals can be evaluated by an FP32 copy of the same Rys kernel (gvhf-rys/gen_f32.py) with an error
+# ~ eps32 * w_sp * |dI|.  Pairs are taken into the FP32 tier in ascending w_sp while the cumulated weight stays below
+# GRAD_TIERS['frac'] of the total (per aux batch).  None: off (FP64 for every pair).
+GRAD_TIERS = None
+# digits of the Ozaki-I INT8 product for the pseudo-density build Gamma = C_r (Z C_l) (reduction length nocc); 0: FP64
+GAMMA_OZ1_NDIG = 0
+GAMMA_OZ1_BUDGET = 1.0e9
+_libf32 = None
+
+
+def _lib_f32():
+    global _libf32
+    if _libf32 is None:
+        from gpu4pyscf.lib.cupy_helper import load_library
+        try:
+            _libf32 = load_library('libgvhf_rys_f32')
+            _libf32.sum_ejk_int3c2e_ip1_f32.restype = ctypes.c_int
+        except OSError:
+            _libf32 = False
+    return _libf32
+
+
+def _envs_f32(envs):
+    from gpu4pyscf.gto.mole import RysIntEnvVars
+    atm, bas, env, ao_loc = envs._env_ref_holder
+    obj = RysIntEnvVars.new(envs.natm, envs.nbas, atm, bas, env.astype(np.float32), ao_loc)
+    return obj
+
+
+def _gamma_oz1(dm_oo, fl, fr, out3, alpha, beta):
+    '''out3[p, q, r] = alpha * sum_i fr[p, i] (sum_j dm_oo[r, j, i] fl[q, j]) + beta * out3  (Ozaki-I INT8 product,
+    reduction length nocc), in column blocks of (q, r) under GAMMA_OZ1_BUDGET bytes of int32 digit products.'''
+    ndig = GAMMA_OZ1_NDIG
+    nao, _, dk = out3.shape
+    nocc = fr.shape[1]
+    tq = cp.empty((nao, dk, nocc))
+    contract('rji,qj->qri', dm_oo, fl, out=tq)
+    bt = tq.reshape(nao * dk, nocc)
+    out2 = out3.reshape(nao, nao * dk)
+    per_col = ndig * (nao + 16) * 4 + ndig * 64
+    cb = max(dk, int(GAMMA_OZ1_BUDGET // per_col) // dk * dk)
+    for c0 in range(0, nao * dk, cb):
+        c1 = min(nao * dk, c0 + cb)
+        crt_gemm.ozaki1_gemm_nt(fr, bt[c0:c1], ndig, out=out2[:, c0:c1], alpha=alpha, beta=beta)
+
+
+def _tier_split(compressed, ao_pair_loc, group_sp, frac):
+    '''Boolean mask over shell pairs (FP32 tier) from the Gamma weights of this aux batch.'''
+    rowl1 = abs(compressed).sum(axis=1)
+    cs = cp.concatenate([cp.zeros(1), cp.cumsum(rowl1)])
+    w = cs[ao_pair_loc[1:]] - cs[ao_pair_loc[:-1]]
+    order = cp.argsort(w)
+    cw = cp.cumsum(w[order])
+    nlow = int(cp.searchsorted(cw, frac * float(cw[-1]), side='right'))
+    low = cp.zeros(w.size, dtype=bool)
+    low[order[:nlow]] = True
+    return low
+
+
+def _tier_tables(mask, bas_ij_idx, ao_pair_loc, group_sp, group_bs):
+    '''(bas_ij_idx, shl_pair_offsets, ao_pair_loc) restricted to the shell pairs in mask; blocks never mix (li, lj)
+    groups (the kernel requires one angular pattern per block).'''
+    idx_parts, loc_parts, offs = [], [], []
+    n = 0
+    m = mask.get()
+    for (s0, s1), bs in zip(group_sp, group_bs):
+        sel = np.nonzero(m[s0:s1])[0] + s0
+        if sel.size == 0:
+            continue
+        selg = cp.asarray(sel)
+        idx_parts.append(bas_ij_idx[selg])
+        loc_parts.append(ao_pair_loc[selg])
+        offs.append(np.arange(n, n + sel.size, bs, dtype=np.int32))
+        n += sel.size
+    if n == 0:
+        return None
+    offs.append(np.array([n], dtype=np.int32))
+    return (cp.asarray(cp.hstack(idx_parts), dtype=np.uint32), cp.asarray(np.hstack(offs), dtype=np.int32),
+            cp.asarray(cp.hstack(loc_parts), dtype=np.int32))
+
+
 def _gen_metric_solver(int2c, decompose_j2c='CD', lindep=df.LINEAR_DEP_THR):
     ''' generate a solver to solve Ax = b, RHS must be in (n,....) '''
     if decompose_j2c.upper() == 'CD':
@@ -254,6 +338,18 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
     if j_factor != 0:
         dm = dm_factor_l.dot(dm_factor_r.T)
 
+    tiers = GRAD_TIERS if (GRAD_TIERS and _lib_f32()) else None
+    if tiers:
+        group_sp, group_bs = [], []
+        sp1 = 0
+        for (gi, gj), bas_ij in int3c2e_opt.bas_ij_cache.items():
+            sp0, sp1 = sp1, sp1 + len(bas_ij)
+            group_sp.append((sp0, sp1))
+            group_bs.append(int(pair_batch_size) if np.ndim(pair_batch_size) == 0 else
+                            int(pair_batch_size[mol.uniq_l_ctr[gi, 0], mol.uniq_l_ctr[gj, 0]]))
+        envs32 = _envs_f32(int3c2e_opt.int3c2e_envs)
+        tier_stats = [0, 0]
+
     int3c2e_envs = int3c2e_opt.int3c2e_envs
     kern = libvhf_rys.sum_ejk_int3c2e_ip1
     aux0 = aux1 = 0
@@ -277,12 +373,15 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
             if j_factor != 0:
                 cp.multiply(dm[:,:,None], auxvec[aux0:aux1], out=dm_tensor)
                 beta = j_factor
-            contract('rji,qj->iqr', dm_oo[aux0:aux1], dm_factor_l, out=tmp)
-            if JK_GRAD_CRT_MODULI:
-                _crt_contract_r(cp.ascontiguousarray(dm_factor_r), tmp, dm_tensor,
-                                alpha=-.5 * k_factor, beta=beta)
+            if GAMMA_OZ1_NDIG:
+                _gamma_oz1(dm_oo[aux0:aux1], dm_factor_l, dm_factor_r, dm_tensor, -.5 * k_factor, beta)
             else:
-                contract('iqr,pi->pqr', tmp, dm_factor_r, -.5*k_factor, beta, out=dm_tensor)
+                contract('rji,qj->iqr', dm_oo[aux0:aux1], dm_factor_l, out=tmp)
+                if JK_GRAD_CRT_MODULI:
+                    _crt_contract_r(cp.ascontiguousarray(dm_factor_r), tmp, dm_tensor,
+                                    alpha=-.5 * k_factor, beta=beta)
+                else:
+                    contract('iqr,pi->pqr', tmp, dm_factor_r, -.5*k_factor, beta, out=dm_tensor)
             if hermi == 1:
                 cp.take(dm_tensor.reshape(-1,dk), pair_addresses, axis=0,
                         out=compressed[:,k0:k1])
@@ -292,33 +391,75 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                 dm_tensor1[:] += dm_tensor
                 cp.take(dm_tensor1.reshape(-1,dk), pair_addresses, axis=0,
                         out=compressed[:,k0:k1])
-        err = kern(
-            ctypes.cast(ejk.data.ptr, ctypes.c_void_p),
-            ctypes.cast(ejk_aux.data.ptr, ctypes.c_void_p),
-            ctypes.cast(compressed.data.ptr, ctypes.c_void_p),
-            lib.c_null_ptr(),
-            ctypes.c_int(1),
-            ctypes.c_double(omega),
-            ctypes.c_double(lr_factor),
-            ctypes.c_double(sr_factor),
-            ctypes.byref(int3c2e_envs),
-            ctypes.c_int(shm_size_max),
-            ctypes.c_int(len(shl_pair_offsets) - 1),
-            ctypes.c_int(kend-kbatch),
-            ctypes.cast(shl_pair_offsets.data.ptr, ctypes.c_void_p),
-            ctypes.cast(bas_ij_idx.data.ptr, ctypes.c_void_p),
-            ctypes.cast(ksh_offsets_gpu[kbatch:].data.ptr, ctypes.c_void_p),
-            ctypes.cast(gout_stride.data.ptr, ctypes.c_void_p),
-            ctypes.cast(ao_pair_loc.data.ptr, ctypes.c_void_p),
-            ctypes.c_int(aux_ao_offset),
-            ctypes.c_int(nao), ctypes.c_int(nao_pair),
-            ctypes.c_int(naux_in_batch), ctypes.c_int(mol.natm))
-        if err != 0:
-            raise RuntimeError('int3c2e_ejk_ip1 failed')
+        if tiers:
+            low = _tier_split(compressed, ao_pair_loc, group_sp, tiers['frac'])
+            tab_hi = _tier_tables(~low, bas_ij_idx, ao_pair_loc, group_sp, group_bs)
+            tab_lo = _tier_tables(low, bas_ij_idx, ao_pair_loc, group_sp, group_bs)
+            tier_stats[0] += int(low.sum()); tier_stats[1] += low.size
+        else:
+            tab_hi, tab_lo = (bas_ij_idx, shl_pair_offsets, ao_pair_loc), None
+        if tab_hi is not None:
+            t_idx, t_off, t_loc = tab_hi
+            err = kern(
+                ctypes.cast(ejk.data.ptr, ctypes.c_void_p),
+                ctypes.cast(ejk_aux.data.ptr, ctypes.c_void_p),
+                ctypes.cast(compressed.data.ptr, ctypes.c_void_p),
+                lib.c_null_ptr(),
+                ctypes.c_int(1),
+                ctypes.c_double(omega),
+                ctypes.c_double(lr_factor),
+                ctypes.c_double(sr_factor),
+                ctypes.byref(int3c2e_envs),
+                ctypes.c_int(shm_size_max),
+                ctypes.c_int(len(t_off) - 1),
+                ctypes.c_int(kend-kbatch),
+                ctypes.cast(t_off.data.ptr, ctypes.c_void_p),
+                ctypes.cast(t_idx.data.ptr, ctypes.c_void_p),
+                ctypes.cast(ksh_offsets_gpu[kbatch:].data.ptr, ctypes.c_void_p),
+                ctypes.cast(gout_stride.data.ptr, ctypes.c_void_p),
+                ctypes.cast(t_loc.data.ptr, ctypes.c_void_p),
+                ctypes.c_int(aux_ao_offset),
+                ctypes.c_int(nao), ctypes.c_int(nao_pair),
+                ctypes.c_int(naux_in_batch), ctypes.c_int(mol.natm))
+            if err != 0:
+                raise RuntimeError('int3c2e_ejk_ip1 failed')
+        if tab_lo is not None:
+            t_idx, t_off, t_loc = tab_lo
+            ejk32 = cp.zeros((mol.natm, 3), dtype=np.float32)
+            ejk32_aux = cp.zeros((mol.natm, 3), dtype=np.float32)
+            comp32 = compressed.astype(np.float32)
+            err = _lib_f32().sum_ejk_int3c2e_ip1_f32(
+                ctypes.cast(ejk32.data.ptr, ctypes.c_void_p),
+                ctypes.cast(ejk32_aux.data.ptr, ctypes.c_void_p),
+                ctypes.cast(comp32.data.ptr, ctypes.c_void_p),
+                lib.c_null_ptr(),
+                ctypes.c_int(1),
+                ctypes.c_float(omega),
+                ctypes.c_float(lr_factor),
+                ctypes.c_float(sr_factor),
+                ctypes.byref(envs32),
+                ctypes.c_int(shm_size_max),
+                ctypes.c_int(len(t_off) - 1),
+                ctypes.c_int(kend-kbatch),
+                ctypes.cast(t_off.data.ptr, ctypes.c_void_p),
+                ctypes.cast(t_idx.data.ptr, ctypes.c_void_p),
+                ctypes.cast(ksh_offsets_gpu[kbatch:].data.ptr, ctypes.c_void_p),
+                ctypes.cast(gout_stride.data.ptr, ctypes.c_void_p),
+                ctypes.cast(t_loc.data.ptr, ctypes.c_void_p),
+                ctypes.c_int(aux_ao_offset),
+                ctypes.c_int(nao), ctypes.c_int(nao_pair),
+                ctypes.c_int(naux_in_batch), ctypes.c_int(mol.natm))
+            if err != 0:
+                raise RuntimeError('int3c2e_ejk_ip1 (FP32 tier) failed')
+            ejk += ejk32
+            ejk_aux += ejk32_aux
+            comp32 = None
     buf = buf1 = buf2 = compressed = dm_tensor = dm_tensor1 = tmp = None
     if hermi == 1:
         ejk *= 2
         ejk_aux *= 2
+    if tiers:
+        log.debug('DF gradient tiers: %d of %d shell-pair blocks in FP32', *tier_stats)
     t0 = log.timer_debug1('contract int3c2e_ejk_ip1', *t0)
 
     if auxbasis_response:

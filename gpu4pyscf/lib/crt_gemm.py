@@ -49,7 +49,8 @@ def _quant_src(n, wide):
     body = [_resid_code(i, p, wide, f'out[(size_t){i} * plane + idx]') for i, p in enumerate(ALL_MODULI[:n])]
     return r'''
 extern "C" __global__ void quant(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
-                                 int ncomp, int rows, int ng, int rp, int kp, int q, size_t plane)
+                                 int ncomp, int rows, int ng, int rp, int kp, int q, size_t plane,
+                                 const int* __restrict__ cmap)
 {
     size_t gid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= (size_t)rp * kp) return;
@@ -58,7 +59,7 @@ extern "C" __global__ void quant(const double* __restrict__ a, const int* __rest
     ''' + T + r''' x = 0;
     if (row < rows && col < ncomp * ng) {
         int c = col / ng, g = col - c * ng;
-        double v = ldexp(a[((size_t)c * rows + row) * ng + g], q - ex[row]);
+        double v = ldexp(a[((size_t)cmap[c] * rows + row) * ng + g], q - ex[row]);
         x = (''' + T + r''')llrint(v);
     }
     ''' + pre + '\n    ' + '\n    '.join(body) + '\n}\n'
@@ -170,12 +171,13 @@ def _pad16(n):
 
 
 _ROWEXP_SRC = r'''
-extern "C" __global__ void rowexp(const double* __restrict__ a, int* __restrict__ e, int ncomp, int rows, int ng)
+extern "C" __global__ void rowexp(const double* __restrict__ a, int* __restrict__ e, int ncomp, int rows, int ng,
+                                  const int* __restrict__ cmap)
 {
     int row = blockIdx.x;
     double m = 0.;
     for (int c = 0; c < ncomp; c++) {
-        const double* p = a + ((size_t)c * rows + row) * ng;
+        const double* p = a + ((size_t)cmap[c] * rows + row) * ng;
         for (int g = threadIdx.x; g < ng; g += blockDim.x) m = fmax(m, fabs(p[g]));
     }
     for (int o = 16; o > 0; o >>= 1) m = fmax(m, __shfl_down_sync(0xffffffff, m, o));
@@ -196,26 +198,40 @@ extern "C" __global__ void rowexp(const double* __restrict__ a, int* __restrict_
 _rowexp_kernel = None
 
 
-def _row_exponent(src):
-    '''src [ncomp, rows, ng] -> int32 exponent e with max|src[:, r, :]| < 2^e.'''
+_cmaps = {}
+
+
+def _cmap(comps, ncomp):
+    key = tuple(range(ncomp)) if comps is None else tuple(comps)
+    m = _cmaps.get(key)
+    if m is None:
+        m = _cmaps[key] = cupy.asarray(np.asarray(key, dtype=np.int32))
+    return m
+
+
+def _row_exponent(src, comps=None):
+    '''src [ncomp, rows, ng] -> int32 exponent e with max|src[comps, r, :]| < 2^e (comps: component subset).'''
     global _rowexp_kernel
     if _rowexp_kernel is None:
         _rowexp_kernel = cupy.RawKernel(_ROWEXP_SRC, 'rowexp')
     ncomp, rows, ng = src.shape
+    nc = ncomp if comps is None else len(comps)
     e = cupy.empty(rows, dtype=cupy.int32)
-    _rowexp_kernel((rows,), (256,), (src, e, np.int32(ncomp), np.int32(rows), np.int32(ng)))
+    _rowexp_kernel((rows,), (256,), (src, e, np.int32(nc), np.int32(rows), np.int32(ng), _cmap(comps, ncomp)))
     return e
 
 
 class Operand:
     '''Residues of an operand given as float64 [ncomp, rows, ng] (reduction axis = comp x ng).'''
 
-    def __init__(self, src, nmod, q, e=None):
+    def __init__(self, src, nmod, q, e=None, comps=None):
+        '''comps: use only these components of src (no copy), in this order.'''
         assert src.dtype == cupy.float64 and src.flags.c_contiguous
-        ncomp, rows, ng = src.shape
+        ncomp_src, rows, ng = src.shape
+        ncomp = ncomp_src if comps is None else len(comps)
         self.rows, self.nmod, self.q = rows, nmod, q
         self.rp, self.kp = _pad16(rows), _pad16(ncomp * ng)
-        self.e = _row_exponent(src) if e is None else e
+        self.e = _row_exponent(src, comps) if e is None else e
         ex = cupy.zeros(self.rp, dtype=cupy.int32)
         ex[:rows] = self.e
         self.planes = cupy.empty((nmod, self.rp, self.kp), dtype=cupy.int8)
@@ -223,7 +239,8 @@ class Operand:
         thr = 256
         _get('q', nmod, q > 30)(((tot + thr - 1) // thr,), (thr,),
                                 (src, ex, self.planes, np.int32(ncomp), np.int32(rows), np.int32(ng),
-                                 np.int32(self.rp), np.int32(self.kp), np.int32(q), np.uint64(tot)))
+                                 np.int32(self.rp), np.int32(self.kp), np.int32(q), np.uint64(tot),
+                                 _cmap(comps, ncomp_src)))
 
 
 class PlanesT:
@@ -422,3 +439,90 @@ def rho_from_cT(c, ng, xctype):
     _, ngp, nocc = c.shape
     _rho_kernel(((ng + 3) // 4,), (128,), (rho, c, np.int64(ngp), np.int64(nocc), np.int64(ng), np.int64(mode)))
     return rho
+
+
+# ------------------------------------------------------------------ Ozaki-I with INT8 digits (short reductions)
+# For GEMMs with a short reduction (K ~ nocc) the CRT reconstruction per output costs as much as the product.  Ozaki
+# scheme I with balanced base-2^7 digits needs no reconstruction: x = 2^e sum_s d_s 2^(-6-7s), |d_s| <= 64; the
+# digit products of one group g = s + t are summed exactly in int32 by ONE INT8 GEMM over the concatenated K axis
+# ([a_0 .. a_g] . [b_g .. b_0]), and the result is sum_g 2^(ea+eb-12-7g) C_g.  Exact int32 accumulation needs
+# (g+1) * K * 64^2 < 2^31, i.e. K * (g+1) < 524288.  `ndig` digits give ~6 + 7 (ndig-1) bits per operand.
+_OZ1_SLICE_SRC = r'''
+extern "C" __global__ void oz1_slice(const double* __restrict__ a, const int* __restrict__ ex,
+                                     signed char* __restrict__ out, int rows, int k, int kp, int ndig, size_t plane)
+{
+    size_t gid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= (size_t)rows * kp) return;
+    int row = (int)(gid / kp), col = (int)(gid % kp);
+    double v = (col < k) ? ldexp(a[(size_t)row * k + col], 6 - ex[row]) : 0.;
+    for (int s = 0; s < ndig; s++) {
+        double d = rint(v);
+        out[(size_t)s * plane + gid] = (signed char)d;
+        v = (v - d) * 128.;
+    }
+}
+'''
+_OZ1_COMBINE_SRC = r'''
+extern "C" __global__ void oz1_combine(const int* __restrict__ C, const int* __restrict__ ea, const int* __restrict__ eb,
+                                       double* __restrict__ out, int m, int n, int np_, int ngrp, size_t plane,
+                                       double alpha, double beta, long long ldo)
+{
+    size_t gid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= (size_t)m * n) return;
+    int i = (int)(gid / n), j = (int)(gid % n);
+    size_t idx = (size_t)i * np_ + j;
+    double x = 0.;
+    for (int g = ngrp - 1; g >= 0; g--) x = x * (1. / 128.) + (double)C[(size_t)g * plane + idx];
+    x = ldexp(x, ea[i] + eb[j] - 12);
+    size_t o = (size_t)i * ldo + j;
+    out[o] = (beta == 0.) ? alpha * x : alpha * x + beta * out[o];
+}
+'''
+
+
+def _oz1_slices(a, ndig):
+    '''a (rows, k) float64 C-contiguous -> (digits int8 [ndig, rows_pad, k_pad], exponents int32 [rows_pad])'''
+    rows, k = a.shape
+    rp, kp = _pad16(rows), _pad16(k)
+    e = _row_exponent(a[None])
+    ex = cupy.zeros(rp, dtype=cupy.int32)
+    ex[:rows] = e
+    dig = cupy.zeros((ndig, rp, kp), dtype=cupy.int8)
+    k_ = _kern.get('oz1s')
+    if k_ is None:
+        k_ = _kern['oz1s'] = cupy.RawKernel(_OZ1_SLICE_SRC, 'oz1_slice')
+    tot = rows * kp
+    k_(((tot + 255) // 256,), (256,), (a, ex, dig, np.int32(rows), np.int32(k), np.int32(kp), np.int32(ndig),
+                                      np.uint64(rp * kp)))
+    return dig, ex
+
+
+def ozaki1_gemm_nt(a, bt, ndig=6, out=None, alpha=1.0, beta=0.0, bslices=None):
+    '''out (m, n) = alpha * a (m, k) @ bt (n, k)^T + beta * out, FP64-class (~6 + 7 (ndig-1) bits per operand) from
+    exact INT8 tensor-core products (Ozaki scheme I, one GEMM per digit group).  For short k (k * ndig < 524288).
+    bslices: precomputed _oz1_slices(bt, ndig) to reuse one operand.  out may be a column block of a C-contiguous
+    matrix (row stride out.strides[0]).'''
+    m, k = a.shape
+    n = bt.shape[0]
+    assert k * ndig < 524288
+    da, ea = _oz1_slices(cupy.ascontiguousarray(a), ndig)
+    db, eb = bslices if bslices is not None else _oz1_slices(cupy.ascontiguousarray(bt), ndig)
+    mp, kp = da.shape[1], da.shape[2]
+    npd = db.shape[1]
+    C = cupy.empty((ndig, mp, npd), dtype=cupy.int32)
+    for g in range(ndig):
+        A = cupy.ascontiguousarray(da[:g + 1].transpose(1, 0, 2).reshape(mp, (g + 1) * kp))
+        B = cupy.ascontiguousarray(db[g::-1].transpose(1, 0, 2).reshape(npd, (g + 1) * kp))
+        int8_mm_nt(A, B, C[g])
+    if out is None:
+        out = cupy.empty((m, n))
+        beta = 0.0
+    assert out.dtype == cupy.float64 and out.strides[1] == 8
+    ldo = out.strides[0] // 8
+    kc = _kern.get('oz1c')
+    if kc is None:
+        kc = _kern['oz1c'] = cupy.RawKernel(_OZ1_COMBINE_SRC, 'oz1_combine')
+    tot = m * n
+    kc(((tot + 255) // 256,), (256,), (C, ea, eb, out, np.int32(m), np.int32(n), np.int32(npd), np.int32(ndig),
+                                      np.uint64(mp * npd), np.float64(alpha), np.float64(beta), np.int64(ldo)))
+    return out

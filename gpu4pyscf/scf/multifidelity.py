@@ -51,16 +51,32 @@ DEFAULTS = dict(
     max_inner=40,
     max_stage1=60,
     fine_vco=True,                # fine XC as V_xc C_occ (occupied projection) instead of the full matrix
-    fuse_grad=True,
-    coarse_xc='inc',
-    grad_fit_reuse=True,          # precompute J^-1 (P|ij) for the DF gradient from the SCF tensors              # 'inc': cached-AO FP32 increments of the coarse XC (stage 1: FP32 absolute); 'exact'               # XC nuclear gradient in the (predicted) last fine pass; used by the DF-RKS gradient
+    fuse_grad=True,               # XC nuclear gradient in the (predicted) last fine pass; used by the DF-RKS gradient
+    coarse_xc='inc',              # 'inc': cached-AO FP32 increments of the coarse XC (stage 1: FP32 absolute); 'exact'
+    grad_fit_reuse=True,          # precompute J^-1 (P|ij) for the DF gradient from the SCF tensors
     eig='fp64',                   # 'fp64' | 'fp32oa' (FP32 syevd + Ogita-Aishima; slower than syevd at nao~600 on T4)
+    # precision follows the residual: an outer step whose predicted residual is far above the tolerance only needs a
+    # proportionally accurate exact operator (inexact defect correction); the certifying last step is always exact
+    schedule=False,
+    cheap_grid=(75, 302),         # 'cheap' outer level: XC grid, VV10 grid, INT8 moduli of XC and K
+    cheap_nlc_grid=(30, 110),
+    cheap_moduli=9,
+    medium_moduli=9,              # 'medium' level: fine grids, fewer moduli
+    cheap_factor=100.,            # level from the predicted residual est = inner_factor * |g| of the previous outer:
+    medium_factor=3.,             # est > cheap_factor * tol -> cheap, > medium_factor * tol -> medium, else exact
+    exact_k='stored',             # 'stored': DF tensors in memory; 'direct': two streamed integral passes per outer
+    direct_nmod=(15, 11),         # INT8-CRT moduli of the direct passes (pass 1 is amplified by J^-1); None: FP64
+    inner_eig='full',             # 'full': diagonalise every inner cycle; 'rotate': preconditioned occupied-subspace
+    rotate_steps=2,               # rotation (pseudo-diagonalisation, no nao^3 step) with the stage-1 virtuals as preconditioner
     precision=None,               # dict for mixed_precision.fast_precision; default from mf.mixed_precision / GPU
 )
 
 
 def _sync():
     cupy.cuda.Stream.null.synchronize()
+
+
+_NVTX = bool(int(__import__('os').environ.get('GPU4PYSCF_MF_NVTX', '0')))
 
 
 class _Timer:
@@ -73,10 +89,14 @@ class _Timer:
         class _Ctx:
             def __enter__(self):
                 _sync()
+                if _NVTX:
+                    cupy.cuda.nvtx.RangePush(key)
                 self.t0 = time.perf_counter()
 
             def __exit__(self, *a):
                 _sync()
+                if _NVTX:
+                    cupy.cuda.nvtx.RangePop()
                 v = tim.t.setdefault(key, [0.0, 0])
                 v[0] += time.perf_counter() - self.t0
                 v[1] += 1
@@ -358,6 +378,28 @@ def _grid(mol, atom_grid, like=None):
     return g
 
 
+class _moduli_ctx:
+    '''Temporarily lower the INT8-CRT moduli of the XC and DF-K GEMMs (no-op for None or non-crt paths).'''
+    def __init__(self, n):
+        self.n = n
+
+    def __enter__(self):
+        if self.n is None:
+            return
+        from gpu4pyscf.dft import numint
+        from gpu4pyscf.df import df_jk
+        self.old = numint.XC_CRT_MODULI, df_jk.K_CRT_MODULI
+        numint.XC_CRT_MODULI = min(self.n, numint.XC_CRT_MODULI)
+        df_jk.K_CRT_MODULI = min(self.n, df_jk.K_CRT_MODULI)
+
+    def __exit__(self, *a):
+        if self.n is None:
+            return
+        from gpu4pyscf.dft import numint
+        from gpu4pyscf.df import df_jk
+        numint.XC_CRT_MODULI, df_jk.K_CRT_MODULI = self.old
+
+
 def _precision_ctx(mf, opt):
     from gpu4pyscf.scf import mixed_precision as mp
     if opt.get('precision'):
@@ -396,6 +438,20 @@ def kernel(mf, dm0=None, **kwargs):
             ni.build(mol, mf.grids.coords)
         g_in = _grid(mol, opt['inner_grid'], mf.grids)
         g_nlc1 = _grid(mol, opt['stage1_nlc_grid'], mf.nlcgrids) if with_nlc else None
+        dk_fr = dk_lr = None
+        if opt['exact_k'] == 'direct':
+            from gpu4pyscf.df.direct_k import DirectDFK
+            if getattr(mf.with_df, 'auxmol', None) is None:
+                mf.with_df.build(build_cderi=False) if 'build_cderi' in mf.with_df.build.__code__.co_varnames \
+                    else mf.with_df.build()
+            nm = opt['direct_nmod'] or (None, None)
+            dk_fr = DirectDFK(mol, mf.with_df.auxmol, None, nmod_t=nm[0], nmod_x=nm[1])
+            if omega != 0:
+                dk_lr = DirectDFK(mol, mf.with_df.auxmol, omega, nmod_t=nm[0], nmod_x=nm[1])
+        g_cheap = g_nlc_cheap = None
+        if opt['schedule']:
+            g_cheap = _grid(mol, opt['cheap_grid'], mf.grids)
+            g_nlc_cheap = _grid(mol, opt['cheap_nlc_grid'], mf.nlcgrids) if with_nlc else None
         h1e = cupy.asarray(mf.get_hcore())
         s1e = cupy.asarray(mf.get_ovlp())
         e_nuc = mf.energy_nuc()
@@ -416,7 +472,40 @@ def kernel(mf, dm0=None, **kwargs):
         occ[:nocc] = 2
         return e, C, occ
 
+    Sinv = eig.X @ eig.X.T if opt['inner_eig'] == 'rotate' else None
+
+    def proj_grad(X_, Co_):
+        '''2 |C_v^T X| for the orthonormal complement of the S-orthonormal Co_ (no virtual orbitals needed)'''
+        t = float(cupy.einsum('ia,ia->', X_, Sinv @ X_)) - float(cupy.linalg.norm(Co_.T @ X_)) ** 2
+        return 2 * np.sqrt(max(t, 0.0))
+
+    def rotate(fd, C, e):
+        '''occupied-subspace update without diagonalisation: canonicalise in the occupied block, first-order
+        rotation into the S-projected reference virtuals (preconditioner: reference orbital energies), Loewdin.'''
+        Co_, Cv0, ev = C[:, :nocc], C[:, nocc:], e[nocc:]
+        SCv0 = s1e @ Cv0
+        for _ in range(opt['rotate_steps']):
+            G = fd @ Co_
+            eo_, U = cupy.linalg.eigh(0.5 * (Co_.T @ G + G.T @ Co_))
+            Co_ = Co_ @ U
+            G = G @ U
+            Cv = Cv0 - Co_ @ (Co_.T @ SCv0)
+            kappa = (Cv.T @ G) / (eo_[None, :] - ev[:, None])
+            Co_ = Co_ + Cv @ kappa
+            w_, V_ = cupy.linalg.eigh(Co_.T @ s1e @ Co_)
+            Co_ = Co_ @ ((V_ / cupy.sqrt(w_)) @ V_.T)
+        G = fd @ Co_
+        eo_, U = cupy.linalg.eigh(0.5 * (Co_.T @ G + G.T @ Co_))
+        Co_ = Co_ @ U
+        Cn = C.copy()
+        Cn[:, :nocc] = Co_
+        en = e.copy()
+        en[:nocc] = eo_
+        return en, Cn
+
     def orb_grad(f, C):
+        if Sinv is not None:
+            return proj_grad(f @ C[:, :nocc], C[:, :nocc])
         return 2 * float(cupy.linalg.norm(C[:, nocc:].T @ f @ C[:, :nocc]))
 
     def vxc_coarse(dm, nlc=False):
@@ -486,35 +575,61 @@ def kernel(mf, dm0=None, **kwargs):
         mf._mf_xc_grad = None
         last_inner_tol = None
         xctype = ni._xc_type(xc)
+        levels = []
         for outer in range(opt['max_outer']):
             ncyc['outer'] += 1
             Co = C[:, :nocc]
-            want_grad = (opt['fuse_grad'] and opt['fine_vco'] and xctype in ('GGA', 'MGGA')
+            level = 'exact'
+            if opt['schedule'] and not (levels and levels[-1] != 'exact' and hist[-1][0] < conv_tol_grad):
+                if outer == 0:
+                    level = 'cheap'
+                else:
+                    est = opt['inner_factor'] * hist[-1][0]
+                    if est > opt['cheap_factor'] * conv_tol_grad:
+                        level = 'cheap'
+                    elif est > opt['medium_factor'] * conv_tol_grad:
+                        level = 'medium'
+            levels.append(level)
+            grids_x = g_cheap if level == 'cheap' else mf.grids
+            grids_nlc = g_nlc_cheap if level == 'cheap' else mf.nlcgrids
+            want_grad = (level == 'exact' and opt['fuse_grad'] and opt['fine_vco'] and xctype in ('GGA', 'MGGA')
                          and last_inner_tol is not None and last_inner_tol < conv_tol_grad)
+            lvl_ctx = _moduli_ctx(opt['cheap_moduli'] if level == 'cheap' else
+                                  opt['medium_moduli'] if level == 'medium' else None)
             # exact operator on the occupied space
-            with tim('xc_fine+grad' if want_grad else 'xc_fine'):
+            with lvl_ctx, tim(('xc_fine+grad' if want_grad else 'xc_fine') + ('' if level == 'exact' else '_' + level)):
                 if opt['fine_vco']:
                     from gpu4pyscf.dft.numint import nr_rks_vco
-                    res = nr_rks_vco(ni, mol, mf.grids, xc, C, occ, with_grad=want_grad)
+                    res = nr_rks_vco(ni, mol, grids_x, xc, C, occ, with_grad=want_grad)
                     _, exc, Wxc = res[:3]
                     if want_grad:
                         mf._mf_xc_grad = (res[3], dm.copy())
                 else:
-                    _, exc, vf = ni.nr_rks(mol, mf.grids, xc, dm)
+                    _, exc, vf = ni.nr_rks(mol, grids_x, xc, dm)
                     Wxc = vf @ Co
             enlc = 0.0
             if with_nlc:
-                with tim('nlc_fine'):
-                    _, enlc, vnlc = ni.nr_nlc_vxc(mol, mf.nlcgrids, nlc_xc, dm)
+                with lvl_ctx, tim('nlc_fine' + ('' if level == 'exact' else '_' + level)):
+                    _, enlc, vnlc = ni.nr_nlc_vxc(mol, grids_nlc, nlc_xc, dm)
                 Wxc = Wxc + vnlc @ Co
                 vnlc = None
-            with tim('K exact'):
-                vk = hyb * mf.get_k(mol, dm, hermi=1)
-                if omega != 0:
-                    vk += (alpha - hyb) * mf.get_k(mol, dm, hermi=1, omega=omega)
-                Wk = vk @ Co
-                vk = None
-            vj = get_j(dm)
+            vj = None
+            with lvl_ctx, tim('K exact' + ('' if level == 'exact' else '_' + level)):
+                if opt['exact_k'] == 'direct':
+                    Cw = Co * np.sqrt(2.0)
+                    kc, vj = dk_fr.kc_j(Cw, with_j=True)
+                    Wk = hyb * kc
+                    if omega != 0:
+                        Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False)[0]
+                    Wk /= np.sqrt(2.0)
+                else:
+                    vk = hyb * mf.get_k(mol, dm, hermi=1)
+                    if omega != 0:
+                        vk += (alpha - hyb) * mf.get_k(mol, dm, hermi=1, omega=omega)
+                    Wk = vk @ Co
+                    vk = None
+            if vj is None:
+                vj = get_j(dm)
             hc = h1e + vj
             Wt = hc @ Co + Wxc - 0.5 * Wk
             # energy of this density with the exact operator
@@ -522,10 +637,10 @@ def kernel(mf, dm0=None, **kwargs):
             ecoul = 0.5 * float(cupy.einsum('ij,ji->', dm, vj))
             ek = -0.5 * float(cupy.einsum('ia,ia->', Co, Wk))      # -1/4 tr(D K), D = 2 C C^T
             e_tot = e1 + ecoul + exc + enlc + ek + e_nuc
-            gt = 2 * float(cupy.linalg.norm(C[:, nocc:].T @ Wt))
+            gt = proj_grad(Wt, Co) if Sinv is not None else 2 * float(cupy.linalg.norm(C[:, nocc:].T @ Wt))
             hist.append((gt, e_tot))
-            log.info('multi-fidelity: outer %d  E = %.12f  |g| = %.3e', outer, e_tot, gt)
-            if gt < conv_tol_grad:
+            log.info('multi-fidelity: outer %d (%s)  E = %.12f  |g| = %.3e', outer, level, e_tot, gt)
+            if gt < conv_tol_grad and level == 'exact':
                 break
             # cheap operator at D_ref and the occupied-projected defect
             with tim('K_s exact'):
@@ -549,7 +664,11 @@ def kernel(mf, dm0=None, **kwargs):
             for it in range(opt['max_inner']):
                 with tim('diis'):
                     fd = diis.update(s1e, dm, f)
-                e, C, occ = solve(fd)
+                if opt['inner_eig'] == 'rotate':
+                    with tim('eig rotate'):
+                        e, C = rotate(fd, C, e)
+                else:
+                    e, C, occ = solve(fd)
                 dm = tagged(C, occ)
                 ncyc['inner'] += 1
                 dC = align_increment(Co_ref, C[:, :nocc], s1e)
@@ -571,6 +690,18 @@ def kernel(mf, dm0=None, **kwargs):
 
     # canonical occupied orbitals of the exact operator; virtuals from the surrogate
     Co = C[:, :nocc]
+    if Sinv is not None:
+        # orthonormal virtual complement of the final occupied space, canonical for the last surrogate operator
+        Cv = C[:, nocc:] - Co @ (Co.T @ (s1e @ C[:, nocc:]))
+        w_, V_ = cupy.linalg.eigh(Cv.T @ s1e @ Cv)
+        keep = w_ > 1e-10 * float(w_.max())
+        Cv = Cv @ (V_[:, keep] / cupy.sqrt(w_[keep]))
+        ev, Uv = cupy.linalg.eigh(Cv.T @ f @ Cv)
+        Cv = Cv @ Uv
+        C = cupy.hstack([Co, Cv])
+        e = cupy.concatenate([e[:nocc], ev])
+        occ = cupy.zeros(C.shape[1])
+        occ[:nocc] = 2
     Mo = Co.T @ Wt
     eo, Uo = cupy.linalg.eigh(0.5 * (Mo + Mo.T))
     C = C.copy()
@@ -581,7 +712,7 @@ def kernel(mf, dm0=None, **kwargs):
     mf.e_tot = e_tot
     from gpu4pyscf.df.grad import rhf as df_rhf_grad
     df_rhf_grad.FIT_OO_CACHE = None
-    if opt['grad_fit_reuse'] and hist[-1][0] < conv_tol_grad:
+    if opt['grad_fit_reuse'] and hist[-1][0] < conv_tol_grad and levels[-1] == 'exact':
         # occupied-pair fitting coefficients for the DF J/K gradient from the DF tensors still in memory (the gradient
         # frees them on entry): saves its raw 3c recomputation and metric solve
         with tim('grad fit_oo'):
@@ -591,8 +722,8 @@ def kernel(mf, dm0=None, **kwargs):
                 with mf.with_df.range_coulomb(omega, None, None) as d:
                     cache['lr'] = df_rhf_grad.precompute_fit_oo(d, Cw, omega=omega)
             df_rhf_grad.FIT_OO_CACHE = cache
-    mf.converged = hist[-1][0] < conv_tol_grad
-    mf.multifidelity_stats = dict(cycles=ncyc, outer_hist=hist, timers=tim.t,
+    mf.converged = hist[-1][0] < conv_tol_grad and levels[-1] == 'exact'
+    mf.multifidelity_stats = dict(cycles=ncyc, outer_hist=hist, timers=tim.t, levels=levels,
                                   wall=time.perf_counter() - t_start, conv_tol_grad=conv_tol_grad)
     mf.cycles = ncyc['inner'] + ncyc['stage1']
     log.note('multi-fidelity SCF: E = %.12f  converged = %s  outer %d inner %d stage1 %d',
