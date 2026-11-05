@@ -62,7 +62,13 @@ class DirectDFK:
 
     def _prepare(self, nocc):
         if self._setup is not None and self._setup['nocc'] >= nocc:
-            return self._setup
+            st = self._setup
+            need = (st['nao_pair'] * st['batch_size'] + self.mol.nao ** 2 * st['blksize'] * 3) * 8 \
+                + st['naux'] * nocc ** 2 * 8
+            if get_avail_mem() > 1.1 * need:
+                return st
+            self._setup = None                 # less free memory than at planning time: re-plan the batches
+        cp.get_default_memory_pool().free_all_blocks()
         opt = self.opt
         nao = self.mol.nao      # sorted, decontracted, cartesian
         pair_addresses = opt.pair_and_diag_indices(cart=True, original_ao_order=False)[0]
@@ -146,11 +152,16 @@ class DirectDFK:
             T[a0:a1] = contract('iqr,qj->rij', X, Cc)
             self._t('T = X C', t0)
         W = st['aux_coef']
-        That = W.T.dot(T.reshape(naux, -1))
-        Z = W.dot(That).reshape(naux, nocc, nocc)
-        That = None
-        self._fit = (Z, C) if keep_fit else None
-        T = None
+        # Z = W (W^T T), in column blocks written back into T (naux * nocc^2 is GBs for large molecules)
+        T2 = T.reshape(naux, -1)
+        cb = max(64, int(2.5e8 / (8 * naux)))
+        for c0 in range(0, T2.shape[1], cb):
+            c1 = min(T2.shape[1], c0 + cb)
+            T2[:, c0:c1] = W.dot(W.T.dot(T2[:, c0:c1]))
+        Z = T
+        # the kept fit waits in host memory (naux * nocc^2: GBs for large molecules) until fit_oo()
+        self._fit = (Z.get(), C) if keep_fit else None
+        T = T2 = None
         cvec = None
         if with_j:
             # rho_P = sum_i (P|ii)  ->  c = M rho  =  trace of Z over i
@@ -180,7 +191,7 @@ class DirectDFK:
         '''Fitting coefficients R[k, i, j] = (J^-1 (P|ij))_k of the last kc_j(keep_fit=True) call, in the native aux order
         used by df.grad.rhf.FIT_OO_CACHE (precompute_fit_oo); U rotates the occupied orbitals (C -> C U).'''
         Z, C = self._fit
-        R = Z[self._setup['aux_sorting']]
+        R = cp.asarray(Z)[self._setup['aux_sorting']]
         if U is not None:
             R = cp.einsum('ki,rkl,lj->rij', U, R, U)
         return R

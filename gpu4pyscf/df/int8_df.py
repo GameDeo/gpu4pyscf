@@ -194,9 +194,13 @@ class Int8DF:
         qmax = {8: 127., 16: 32767., 32: 1.}[self.bits]
         if self.host == 'auto':
             self.host = naux * npairs * (self.bits // 8) > 0.5 * get_avail_mem(exclude_memory_pool=False)
+        self.qdt = np.dtype(qdt)
         if self.host:
+            # pinned host memory in row-block chunks of <= 2 GB (single multi-GB pinned allocations can fail)
             import cupyx
-            self.Q = cupyx.empty_pinned((naux, npairs), dtype=qdt)
+            R = max(1, int(2 ** 31 // (npairs * self.qdt.itemsize)))
+            self.Qc = [(r0, cupyx.empty_pinned((min(R, naux - r0), npairs), dtype=qdt)) for r0 in range(0, naux, R)]
+            self.Q = None
         else:
             self.Q = cp.empty((naux, npairs), dtype=qdt)
         self.s = cp.empty(npairs, dtype=np.float32)
@@ -221,7 +225,10 @@ class Int8DF:
                     q = cp.rint(blk / sc[:, None]).astype(qdt).T
                 blk = None
                 if self.host:
-                    self.Q[:, p0:p1] = q.get()
+                    qh = q.get()
+                    for r0, c in self.Qc:
+                        c[:, p0:p1] = qh[r0:r0 + len(c)]
+                    qh = None
                 else:
                     self.Q[:, p0:p1] = q
                 q = None
@@ -233,9 +240,16 @@ class Int8DF:
         diag[cp.asarray(diag_addrs)] = True
         self.pair_w = cp.where(diag, 1., 2.)          # D_p weights of the symmetric pair sum
         self.amax = amax32 if self.bits == 32 else float(self.s.max()) * qmax
-        log.timer('Int8DF build naux=%d npairs=%d bits=%d host=%s (%.2f GB)' % (
-            naux, npairs, self.bits, self.host, naux * npairs * self.bits / 8e9), *t0)
+        log.info('Int8DF build naux=%d npairs=%d bits=%d host=%s (%.2f GB)  %.1f s', naux, npairs, self.bits,
+                 self.host, naux * npairs * self.bits / 8e9, logger.perf_counter() - t0[1])
         return self
+
+    def _host_iter(self, nL):
+        '''(L0, n, pinned host view of rows L0:L0+n) in blocks of <= nL rows that never straddle a chunk'''
+        for r0, c in self.Qc:
+            for a in range(0, len(c), nL):
+                n = min(nL, len(c) - a)
+                yield r0 + a, n, c[a:a + n]
 
     # -------------------------------------------------------------- J
     def j(self, dm):
@@ -254,17 +268,15 @@ class Int8DF:
                    shared_mem=1024 * 8)
         else:
             # pinned host storage: two streamed passes over aux-row blocks
-            nL = max(_GEMV_ROWS, int(2.5e8 / (self.npairs * self.Q.itemsize)) // _GEMV_ROWS * _GEMV_ROWS)
-            qd = cp.empty((min(nL, self.naux), self.npairs), dtype=self.Q.dtype)
-            for L0 in range(0, self.naux, nL):
-                n = min(nL, self.naux - L0)
-                qd[:n].set(self.Q[L0:L0 + n])
+            nL = max(_GEMV_ROWS, int(2.5e8 / (self.npairs * self.qdt.itemsize)) // _GEMV_ROWS * _GEMV_ROWS)
+            qd = cp.empty((min(nL, self.naux), self.npairs), dtype=self.qdt)
+            for L0, n, hv in self._host_iter(nL):
+                qd[:n].set(hv)
                 rowdot(((n + _GEMV_ROWS - 1) // _GEMV_ROWS,), (256,), (qd, u, rho[L0:], npairs, np.int32(n)))
             jp = cp.zeros(self.npairs)
             part = cp.empty(self.npairs)
-            for L0 in range(0, self.naux, nL):
-                n = min(nL, self.naux - L0)
-                qd[:n].set(self.Q[L0:L0 + n])
+            for L0, n, hv in self._host_iter(nL):
+                qd[:n].set(hv)
                 coldot(((self.npairs + 255) // 256,), (256,), (qd, rho[L0:L0 + n].copy(), self.s, part, npairs,
                                                               np.int32(n)), shared_mem=1024 * 8)
                 jp += part
@@ -290,12 +302,13 @@ class Int8DF:
             self._dense = cp.zeros((nL, nao, naop), dtype=dt)            # unscreened pairs stay zero
         buf = self._dense
         inv = 1. / self.amax
-        qdev = cp.empty((nL, self.npairs), dtype=self.Q.dtype) if self.host else None
-        for L0 in range(0, self.naux, nL):
-            n = min(nL, self.naux - L0)
+        qdev = cp.empty((nL, self.npairs), dtype=self.qdt) if self.host else None
+        it = self._host_iter(nL) if self.host else ((L0, min(nL, self.naux - L0), None)
+                                                    for L0 in range(0, self.naux, nL))
+        for L0, n, hv in it:
             tot = n * self.npairs
             if self.host:
-                qdev[:n].set(self.Q[L0:L0 + n])
+                qdev[:n].set(hv)
                 src, l0 = qdev, 0
             else:
                 src, l0 = self.Q, L0
@@ -342,6 +355,7 @@ class Int8DF:
             a16, sa = _to16(Ya)
             b16, sb = (a16, sa) if Bm is None else _to16(Yb)
             P += gemm16_nt(a16, b16) * (sa * sb)
+        self._dense = None
         return P.astype(np.float64) * (sA * self.amax) ** 2
 
     def _k_pairs32(self, A, Bm=None, half_b=None):
@@ -366,4 +380,5 @@ class Int8DF:
                     Yb += half_b * Ya
             X = None
             P += Ya @ Yb.T
+        self._dense = None
         return P.astype(np.float64) * self.amax ** 2

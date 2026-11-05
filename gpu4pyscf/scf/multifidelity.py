@@ -765,11 +765,15 @@ def kernel(mf, dm0=None, **kwargs):
             vj = None
             with lvl_ctx, tim('K exact' + ('' if level == 'exact' else '_' + level)):
                 if opt['exact_k'] == 'direct':
+                    cupy.get_default_memory_pool().free_all_blocks()
                     Cw = Co * np.sqrt(2.0)
-                    kc, vj = dk_fr.kc_j(Cw, with_j=True, keep_fit=True)
+                    # keep J^-1 (P|ij) (naux * nocc^2 per operator) only where this is predicted to be the last
+                    # exact evaluation; otherwise the gradient forms its own fit
+                    kf = last_inner_tol is not None and last_inner_tol < conv_tol_grad
+                    kc, vj = dk_fr.kc_j(Cw, with_j=True, keep_fit=kf)
                     Wk = hyb * kc
                     if omega != 0:
-                        Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False, keep_fit=True)[0]
+                        Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False, keep_fit=kf)[0]
                     Wk /= np.sqrt(2.0)
                 elif opt['occ_k']:
                     # K(D) C_occ directly (no nao^2 K matrix); keeps T = C^T B C for the gradient fit
@@ -899,7 +903,9 @@ def kernel(mf, dm0=None, **kwargs):
         # frees them on entry): saves its raw 3c recomputation and metric solve
         with tim('grad fit_oo'):
             Cw = C[:, :nocc] * np.sqrt(2.0)
-            if dk_fr is not None:
+            if dk_fr is not None and dk_fr._fit is None:
+                cache = None
+            elif dk_fr is not None:
                 # direct exact evaluations: the last pass already formed J^-1 (P|ij); rotate to the canonical orbitals
                 cache = {'C': Cw, 'omega': abs(omega), 'fr': dk_fr.fit_oo(Uo)}
                 if omega != 0:
