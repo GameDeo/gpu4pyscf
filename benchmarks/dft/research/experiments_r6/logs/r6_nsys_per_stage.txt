@@ -1,0 +1,189 @@
+g:DF_JK                  4.65 s
+       3.173  DF/Rys integrals | sum_ejk_int3c2e_ip1_kernel
+       1.067  FP64 GEMM | volta_dgemm_128x64_nn
+       0.214  FP64 GEMM | volta_dgemm_128x64_tn
+       0.094  FP64 GEMM | cutlass_sm75_simt_dgett_f64_
+       0.059  cupy elementwise/reduction | cupy_take
+       0.032  cupy elementwise/reduction | cupy_multiply__float64_float
+xc_fine+grad             2.93 s
+       0.717  CRT quantize/recon | quant
+       0.634  int8 GEMM (tensor core) | Kernel2
+       0.306  cupy elementwise/reduction | cupy_take
+       0.299  other | _cart_kernel_deriv2
+       0.267  CRT quantize/recon | rowexp
+       0.202  other | _sph_kernel_deriv2
+xc_fine                  2.55 s
+       0.541  int8 GEMM (tensor core) | Kernel2
+       0.400  other | _screen_index
+       0.347  CRT quantize/recon | quant
+       0.344  CRT quantize/recon | quant3t
+       0.190  CRT quantize/recon | recon
+       0.159  other | _cart_kernel_deriv1
+K exact                  1.90 s
+       0.468  int8 GEMM (tensor core) | Kernel2
+       0.373  CRT quantize/recon | quant3t
+       0.302  DF/Rys integrals | int3c2e_kernel
+       0.160  other | decompress_kernel
+       0.157  CRT quantize/recon | recon
+       0.102  CRT quantize/recon | colmax
+K_s stage1               1.58 s
+       0.367  DF/Rys integrals | int3c2e_kernel
+       0.236  cupy elementwise/reduction | cupy_multiply__float64_float
+       0.229  cupy elementwise/reduction | cupy_absolute__float64_float
+       0.155  int8 GEMM (tensor core) | Kernel2
+       0.120  FP32 GEMM | volta_sgemm_64x64_tn
+       0.088  FP32 GEMM | volta_sgemm_128x128_tn
+nlc_fine                 1.49 s
+       0.697  VV10 / NLC | vv10_sym
+       0.147  int8 GEMM (tensor core) | Kernel2
+       0.120  other | _screen_index
+       0.106  CRT quantize/recon | quant3t
+       0.097  other | _cart_kernel_deriv1
+       0.065  other | _sph_kernel_deriv1
+g:NLC                    0.87 s
+       0.233  VV10 / NLC | vv10_sym
+       0.225  FP64 GEMM | volta_dgemm_64x64_nt
+       0.113  FP64 GEMM | volta_dgemm_128x64_tn
+       0.055  other | _cart_kernel_deriv2
+       0.050  cupy elementwise/reduction | cupy_multiply__float64_float
+       0.037  other | _sph_kernel_deriv2
+grad fit_oo              0.87 s
+       0.166  CRT quantize/recon | quant3t
+       0.153  FP64 GEMM | volta_dgemm_128x64_nn
+       0.116  int8 GEMM (tensor core) | Kernel2
+       0.078  FP64 GEMM | volta_dgemm_64x64_nt
+       0.074  eigensolver | sytrd4_gpu
+       0.054  other | decompress_kernel
+DF build                 0.85 s
+       0.289  int8 GEMM (tensor core) | Kernel2
+       0.270  DF/Rys integrals | int3c2e_kernel
+       0.175  CRT quantize/recon | recon
+       0.040  CRT quantize/recon | quant
+       0.019  FP64 GEMM | volta_dgemm_64x64_nn
+       0.012  eigensolver | trsm_left_kernel
+eig                      0.71 s
+       0.197  eigensolver | sytrd4_gpu
+       0.069  FP64 GEMM | volta_dgemm_128x64_nn
+       0.065  eigensolver | laed4_par
+       0.064  eigensolver | sytrd4_cta
+       0.051  FP64 GEMM | volta_dgemm_64x64_nt
+       0.049  FP64 GEMM | volta_dgemm_64x64_nn
+J                        0.67 s
+       0.408  cuTENSOR | reduction_kernel_transA
+       0.253  cuTENSOR | reduction_kernel
+       0.001  cupy elementwise/reduction | cupy_scatter_update
+       0.001  cupy elementwise/reduction | cupy_prepare_array_indexing
+       0.001  cupy elementwise/reduction | cupy_scan_naive
+       0.001  cupy elementwise/reduction | cupy_take
+xc_coarse inc            0.58 s
+       0.310  FP32 GEMM | volta_sgemm_128x64_tn
+       0.074  cupy elementwise/reduction | cupy_multiply__float32_float
+       0.062  FP32 GEMM | volta_sgemm_32x128_nt
+       0.060  cuTENSOR | tensor_permute
+       0.033  libxc | work_mgga_gpu_vxc_unpol
+       0.016  other | rho_cT
+xc_coarse32              0.55 s
+       0.297  FP32 GEMM | volta_sgemm_128x64_tn
+       0.068  cupy elementwise/reduction | cupy_multiply__float32_float
+       0.063  FP32 GEMM | volta_sgemm_32x128_nt
+       0.054  cuTENSOR | tensor_permute
+       0.033  libxc | work_mgga_gpu_vxc_unpol
+       0.016  other | rho_cT
+setup                    0.52 s
+       0.383  other | GDFTgrid_weight_kernel
+       0.057  other | _screen_index
+       0.021  other | contract_auxvec_kernel
+       0.010  eigensolver | sytrd4_gpu
+       0.007  cupy elementwise/reduction | cupy_copy__float64_float32
+       0.005  other | _cart_kernel_deriv1
+xc_coarse                0.51 s
+       0.163  int8 GEMM (tensor core) | Kernel2
+       0.089  CRT quantize/recon | quant
+       0.054  CRT quantize/recon | quant3t
+       0.043  other | _cart_kernel_deriv1
+       0.032  CRT quantize/recon | rowexp
+       0.032  other | build_B
+K_s exact                0.34 s
+       0.114  CRT quantize/recon | quant3t
+       0.101  int8 GEMM (tensor core) | Kernel2
+       0.049  other | decompress_kernel
+       0.031  CRT quantize/recon | colmax
+       0.027  CRT quantize/recon | recon
+       0.016  CRT quantize/recon | quant
+K_s inc                  0.31 s
+       0.131  FP32 GEMM | volta_sgemm_64x64_tn
+       0.112  FP32 GEMM | volta_sgemm_128x128_tn
+       0.021  cuTENSOR | tensor_permute
+       0.016  cupy elementwise/reduction | cupy_copy__float32_float32
+       0.015  cupy elementwise/reduction | cupy_multiply__float_float32
+       0.012  cupy elementwise/reduction | cupy_multiply__float32_float
+(none)                   0.25 s
+       0.078  DF/Rys integrals | sum_ejk_int3c2e_ip1_kernel
+       0.062  FP64 GEMM | volta_dgemm_64x64_nt
+       0.031  other | int2e_qcond_kernel
+       0.016  FP64 GEMM | volta_dgemm_64x64_nn
+       0.012  other | gebd2_cta
+       0.010  FP64 GEMM | volta_dgemm_128x64_tn
+xc_coarse set_ref        0.25 s
+       0.220  FP64 GEMM | volta_dgemm_64x64_nt
+       0.015  cupy elementwise/reduction | cupy_copy__float32_float64
+       0.005  cupy elementwise/reduction | splitKreduce_kernel
+       0.004  libxc | work_mgga_gpu_vxc_unpol
+       0.002  other | rho_cT
+       0.000  cupy elementwise/reduction | cupy_take
+diis                     0.23 s
+       0.167  FP64 GEMM | volta_dgemm_128x64_nn
+       0.055  FP64 GEMM | volta_dgemm_64x64_nt
+       0.003  cuTENSOR | tensor_permute
+       0.001  cupy elementwise/reduction | cupy_multiply__float64_float
+       0.000  other | _pack_tril
+       0.000  other | _dfill_triu
+nlc_coarse               0.21 s
+       0.064  other | _screen_index
+       0.028  int8 GEMM (tensor core) | Kernel2
+       0.024  other | _cart_kernel_deriv1
+       0.021  CRT quantize/recon | quant3t
+       0.014  other | _sph_kernel_deriv1
+       0.012  CRT quantize/recon | recon
+K_s set_ref              0.04 s
+       0.030  FP32 GEMM | volta_sgemm_64x64_tn
+       0.003  cupy elementwise/reduction | cupy_copy__float32_float32
+       0.003  cupy elementwise/reduction | cupy_multiply__float32_float
+       0.000  cupy elementwise/reduction | cupy_copy__float64_float64
+       0.000  cupy elementwise/reduction | cupy_copy__float64_float32
+cub::DeviceSegmentedReduce::Sum   0.02 s
+       0.004  cupy elementwise/reduction | cupy_take
+       0.003  CRT quantize/recon | quant
+       0.003  CRT quantize/recon | rowexp
+       0.003  int8 GEMM (tensor core) | Kernel2
+       0.002  cupy elementwise/reduction | DeviceSegmentedReduceKernel
+       0.001  other | GDFT_make_dR_dao_w_kernel
+cub::DeviceReduce::Sum   0.01 s
+       0.001  CRT quantize/recon | quant3t
+       0.001  cupy elementwise/reduction | DeviceReduceKernel
+       0.001  int8 GEMM (tensor core) | Kernel2
+       0.000  other | rho_cT
+       0.000  other | _sph_kernel_deriv1
+       0.000  CRT quantize/recon | recon
+cub::DeviceRadixSort     0.00 s
+       0.003  cupy elementwise/reduction | DeviceRadixSortSingleTileKer
+       0.001  cupy elementwise/reduction | DeviceRadixSortOnesweepKerne
+       0.000  cupy elementwise/reduction | DeviceRadixSortHistogramKern
+       0.000  cupy elementwise/reduction | DeviceRadixSortExclusiveSumK
+thrust::stable_sort      0.00 s
+       0.000  cupy elementwise/reduction | DeviceRadixSortSingleTileKer
+thrust::stable_sort_by_key   0.00 s
+       0.000  cupy elementwise/reduction | DeviceRadixSortOnesweepKerne
+cub::DeviceReduce::Reduce   0.00 s
+       0.000  cupy elementwise/reduction | DeviceReduceSingleTileKernel
+       0.000  cupy elementwise/reduction | DeviceReduceKernel
+       0.000  cuTENSOR | cute_reduction_kernel
+       0.000  cuTENSOR | tensor_permute
+init_guess               0.00 s
+       0.000  FP64 GEMM | volta_dgemm_64x64_tn
+       0.000  cupy elementwise/reduction | cupy_concatenate
+       0.000  cupy elementwise/reduction | cupy_multiply__float64_float
+       0.000  other | _block_diag
+       0.000  FP64 GEMM | gemmk1_kernel
+thrust::transform        0.00 s
+       0.000  cupy elementwise/reduction | transform_kernel

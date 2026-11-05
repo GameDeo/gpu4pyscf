@@ -1,0 +1,75 @@
+profiled GPU span 27.20 s, GPU busy 22.92 s (84 %)
+memcpy total 0.05 s
+kernel time by category:
+  CRT quantize/recon              4.70 s    30709 launches
+  DF/Rys integrals                4.21 s       14 launches
+  other                           2.99 s    15258 launches
+  FP64 GEMM                       2.99 s     2457 launches
+  int8 GEMM (tensor core)         2.66 s     6145 launches
+  cupy elementwise/reduction      1.45 s    63872 launches
+  FP32 GEMM                       1.21 s     2756 launches
+  VV10 / NLC                      0.94 s       26 launches
+  cuTENSOR                        0.83 s     5966 launches
+  eigensolver                     0.69 s     5084 launches
+  libxc                           0.19 s       97 launches
+  AO evaluation                   0.01 s       54 launches
+top kernels:
+    3.251 s  DF/Rys integrals         sum_ejk_int3c2e_ip1_kernel
+    2.663 s  int8 GEMM (tensor core)  Kernel2
+    1.477 s  FP64 GEMM                volta_dgemm_128x64_nn
+    1.441 s  CRT quantize/recon       quant3t
+    1.400 s  CRT quantize/recon       quant
+    0.938 s  DF/Rys integrals         int3c2e_kernel
+    0.937 s  VV10 / NLC               vv10_sym
+    0.890 s  CRT quantize/recon       recon
+    0.692 s  FP64 GEMM                volta_dgemm_64x64_nt
+    0.640 s  other                    _screen_index
+    0.607 s  FP32 GEMM                volta_sgemm_128x64_tn
+    0.532 s  CRT quantize/recon       rowexp
+    0.433 s  CRT quantize/recon       colmax
+    0.408 s  cuTENSOR                 reduction_kernel_transA
+    0.384 s  cupy elementwise/reduction cupy_take
+    0.383 s  other                    GDFTgrid_weight_kernel
+    0.381 s  FP64 GEMM                volta_dgemm_128x64_tn
+    0.355 s  other                    _cart_kernel_deriv2
+    0.354 s  eigensolver              sytrd4_gpu
+    0.342 s  other                    _cart_kernel_deriv1
+    0.335 s  other                    decompress_kernel
+    0.280 s  FP32 GEMM                volta_sgemm_64x64_tn
+    0.253 s  cuTENSOR                 reduction_kernel
+    0.240 s  other                    _sph_kernel_deriv2
+    0.238 s  cupy elementwise/reduction cupy_multiply__float64_float_float64
+NVTX ranges (wall, GPU busy inside, busy %):
+  SCF                    20.74 s  busy   17.27 s ( 83 %)  n=1
+  GRAD                    6.46 s  busy    5.66 s ( 88 %)  n=1
+  g:DF_JK                 4.82 s  busy    4.65 s ( 97 %)  n=2
+  xc_fine+grad            3.41 s  busy    2.96 s ( 87 %)  n=1
+  xc_fine                 3.23 s  busy    2.56 s ( 79 %)  n=2
+  K exact                 2.50 s  busy    1.90 s ( 76 %)  n=3
+  K_s stage1              1.89 s  busy    1.58 s ( 83 %)  n=9
+  nlc_fine                1.83 s  busy    1.50 s ( 82 %)  n=3
+  DF build                1.15 s  busy    0.85 s ( 74 %)  n=1
+  grad fit_oo             1.02 s  busy    0.87 s ( 85 %)  n=1
+  g:NLC                   0.94 s  busy    0.87 s ( 93 %)  n=1
+  eig                     0.71 s  busy    0.71 s ( 99 %)  n=17
+  J                       0.70 s  busy    0.67 s ( 95 %)  n=21
+  setup                   0.62 s  busy    0.52 s ( 84 %)  n=1
+  xc_coarse inc           0.62 s  busy    0.58 s ( 95 %)  n=9
+  xc_coarse32             0.60 s  busy    0.55 s ( 92 %)  n=8
+  xc_coarse               0.56 s  busy    0.51 s ( 91 %)  n=3
+  K_s exact               0.41 s  busy    0.34 s ( 84 %)  n=2
+  K_s inc                 0.35 s  busy    0.31 s ( 87 %)  n=9
+  nlc_coarse              0.34 s  busy    0.22 s ( 63 %)  n=9
+  diis                    0.26 s  busy    0.23 s ( 89 %)  n=17
+  xc_coarse set_ref       0.25 s  busy    0.25 s ( 98 %)  n=2
+  init_guess              0.06 s  busy    0.00 s (  0 %)  n=1
+  K_s set_ref             0.04 s  busy    0.04 s ( 90 %)  n=2
+  cub::DeviceSegmentedReduce::Sum    0.02 s  busy    0.02 s ( 96 %)  n=901
+  cub::DeviceReduce::Sum    0.01 s  busy    0.01 s ( 45 %)  n=261
+  thrust::stable_sort     0.01 s  busy    0.00 s ( 39 %)  n=216
+  cub::DeviceRadixSort    0.01 s  busy    0.00 s ( 31 %)  n=243
+  thrust::stable_sort_by_key    0.00 s  busy    0.00 s ( 51 %)  n=27
+  cub::DeviceReduce::Reduce    0.00 s  busy    0.00 s ( 55 %)  n=23
+  thrust::transform       0.00 s  busy    0.00 s ( 23 %)  n=27
+  cub::DeviceSegmentedReduce::Reduce    0.00 s  busy    0.00 s (100 %)  n=13
+  cub::DeviceScan::InclusiveSum    0.00 s  busy    0.00 s (100 %)  n=4

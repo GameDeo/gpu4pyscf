@@ -48,6 +48,17 @@ class DirectDFK:
         self.nmod_t, self.nmod_x = nmod_t, nmod_x
         self.mem_frac = mem_frac
         self._setup = None
+        self.timers = None          # set to {} to accumulate synchronised per-step timings (profiling)
+
+    def _t(self, key, t0):
+        if self.timers is None:
+            return None
+        import time
+        cp.cuda.Stream.null.synchronize()
+        t = time.perf_counter()
+        if t0 is not None:
+            self.timers[key] = self.timers.get(key, 0.0) + t - t0
+        return t
 
     def _prepare(self, nocc):
         if self._setup is not None and self._setup['nocc'] >= nocc:
@@ -74,6 +85,7 @@ class DirectDFK:
         aux_coef = _decompose_j2c(self.auxmol, aux_sorting, self.omega, self.lr, self.sr)[0]
         self._setup = dict(nocc=nocc, i_addr=cp.asarray(i_addr), j_addr=cp.asarray(j_addr), nao_pair=nao_pair,
                            eval_j3c=eval_j3c, aux_offsets=aux_offsets, batch_size=batch_size, blksize=blksize,
+                           aux_sorting=cp.asarray(aux_sorting),
                            aux_coef=aux_coef, naux=naux)
         return self._setup
 
@@ -86,13 +98,18 @@ class DirectDFK:
         i_addr, j_addr = st['i_addr'], st['j_addr']
         aux1 = 0
         for kbatch in range(len(st['aux_offsets']) - 1):
+            t0 = self._t(None, None)
             compressed = st['eval_j3c'](aux_batch_id=kbatch, out=buf)
+            t0 = self._t('int3c2e', t0)
             nb = compressed.shape[1]
             for k0, k1 in lib.prange(0, nb, blk):
                 dk = k1 - k0
                 aux0, aux1 = aux1, aux1 + dk
                 j3c = j3c_full[:, :, :dk]
+                t0 = self._t(None, None)
                 j3c[j_addr, i_addr] = j3c[i_addr, j_addr] = compressed[:, k0:k1]
+                self._t('unpack', t0)
+                self._last_compressed = compressed[:, k0:k1]
                 yield aux0, aux1, j3c
 
     def _half(self, Cc, j3c, nmod):
@@ -112,9 +129,10 @@ class DirectDFK:
             contract('pqr,pi->iqr', j3c, Cc, out=X)
         return X
 
-    def kc_j(self, C, with_j=True):
+    def kc_j(self, C, with_j=True, keep_fit=False):
         '''C: occupation-weighted occupied orbitals (nao, nocc) in the original (spherical) AO basis, D = C C^T.
-        Returns (K(D) C, J(D)) in the original AO basis (J None if not with_j).'''
+        Returns (K(D) C, J(D)) in the original AO basis (J None if not with_j).
+        keep_fit: keep Z = J^-1 (P|ij) (the occupied-pair fitting coefficients of the DF nuclear gradient) for fit_oo().'''
         mol = self.mol
         nocc = C.shape[1]
         st = self._prepare(nocc)
@@ -122,12 +140,16 @@ class DirectDFK:
         naux = st['naux']
         T = cp.empty((naux, nocc, nocc))
         for a0, a1, j3c in self._blocks(st):
+            t0 = self._t(None, None)
             X = self._half(Cc, j3c, self.nmod_t)
+            t0 = self._t('half pass1', t0)
             T[a0:a1] = contract('iqr,qj->rij', X, Cc)
+            self._t('T = X C', t0)
         W = st['aux_coef']
         That = W.T.dot(T.reshape(naux, -1))
         Z = W.dot(That).reshape(naux, nocc, nocc)
         That = None
+        self._fit = (Z, C) if keep_fit else None
         T = None
         cvec = None
         if with_j:
@@ -135,12 +157,30 @@ class DirectDFK:
             cvec = cp.einsum('rii->r', Z)
         nao = mol.nao
         KC = cp.zeros((nao, nocc))
-        Jc = cp.zeros((nao, nao)) if with_j else None
+        Jp = cp.zeros(st['nao_pair']) if with_j else None
         for a0, a1, j3c in self._blocks(st):
+            t0 = self._t(None, None)
             X = self._half(Cc, j3c, self.nmod_x)
+            t0 = self._t('half pass2', t0)
             KC += contract('iqr,rij->qj', X, Z[a0:a1])
+            t0 = self._t('KC += X Z', t0)
             if with_j:
-                Jc += contract('pqr,r->pq', j3c, cvec[a0:a1])
+                # J on the compressed (significant) pairs: a GEMV over the aux block, no nao^2 x naux contraction
+                Jp += self._last_compressed.dot(cvec[a0:a1])
+                self._t('J', t0)
         KC = mol.apply_CT_dot(KC, axis=0)
-        J = mol.apply_CT_mat_C(Jc) if with_j else None
+        J = None
+        if with_j:
+            Jc = cp.zeros((nao, nao))
+            Jc[st['j_addr'], st['i_addr']] = Jc[st['i_addr'], st['j_addr']] = Jp
+            J = mol.apply_CT_mat_C(Jc)
         return KC, J
+
+    def fit_oo(self, U=None):
+        '''Fitting coefficients R[k, i, j] = (J^-1 (P|ij))_k of the last kc_j(keep_fit=True) call, in the native aux order
+        used by df.grad.rhf.FIT_OO_CACHE (precompute_fit_oo); U rotates the occupied orbitals (C -> C U).'''
+        Z, C = self._fit
+        R = Z[self._setup['aux_sorting']]
+        if U is not None:
+            R = cp.einsum('ki,rkl,lj->rij', U, R, U)
+        return R

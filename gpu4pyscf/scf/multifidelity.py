@@ -66,7 +66,7 @@ DEFAULTS = dict(
     medium_factor=3.,             # est > cheap_factor * tol -> cheap, > medium_factor * tol -> medium, else exact
     exact_k='stored',             # 'stored': DF tensors in memory; 'direct': two streamed integral passes per outer
     direct_nmod=(15, 11),         # INT8-CRT moduli of the direct passes (pass 1 is amplified by J^-1); None: FP64
-    inner_eig='full',             # 'full': diagonalise every inner cycle; 'rotate': preconditioned occupied-subspace
+    inner_eig='rotate',           # 'full': diagonalise every inner cycle; 'rotate': preconditioned occupied-subspace
     rotate_steps=2,               # rotation (pseudo-diagonalisation, no nao^3 step) with the stage-1 virtuals as preconditioner
     precision=None,               # dict for mixed_precision.fast_precision; default from mf.mixed_precision / GPU
 )
@@ -628,10 +628,10 @@ def kernel(mf, dm0=None, **kwargs):
             with lvl_ctx, tim('K exact' + ('' if level == 'exact' else '_' + level)):
                 if opt['exact_k'] == 'direct':
                     Cw = Co * np.sqrt(2.0)
-                    kc, vj = dk_fr.kc_j(Cw, with_j=True)
+                    kc, vj = dk_fr.kc_j(Cw, with_j=True, keep_fit=True)
                     Wk = hyb * kc
                     if omega != 0:
-                        Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False)[0]
+                        Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False, keep_fit=True)[0]
                     Wk /= np.sqrt(2.0)
                 else:
                     vk = hyb * mf.get_k(mol, dm, hermi=1)
@@ -728,10 +728,16 @@ def kernel(mf, dm0=None, **kwargs):
         # frees them on entry): saves its raw 3c recomputation and metric solve
         with tim('grad fit_oo'):
             Cw = C[:, :nocc] * np.sqrt(2.0)
-            cache = {'C': Cw, 'omega': abs(omega), 'fr': df_rhf_grad.precompute_fit_oo(mf.with_df, Cw)}
-            if omega != 0:
-                with mf.with_df.range_coulomb(omega, None, None) as d:
-                    cache['lr'] = df_rhf_grad.precompute_fit_oo(d, Cw, omega=omega)
+            if dk_fr is not None:
+                # direct exact evaluations: the last pass already formed J^-1 (P|ij); rotate to the canonical orbitals
+                cache = {'C': Cw, 'omega': abs(omega), 'fr': dk_fr.fit_oo(Uo)}
+                if omega != 0:
+                    cache['lr'] = dk_lr.fit_oo(Uo)
+            else:
+                cache = {'C': Cw, 'omega': abs(omega), 'fr': df_rhf_grad.precompute_fit_oo(mf.with_df, Cw)}
+                if omega != 0:
+                    with mf.with_df.range_coulomb(omega, None, None) as d:
+                        cache['lr'] = df_rhf_grad.precompute_fit_oo(d, Cw, omega=omega)
             df_rhf_grad.FIT_OO_CACHE = cache
     mf.converged = hist[-1][0] < conv_tol_grad and levels[-1] == 'exact'
     mf.multifidelity_stats = dict(cycles=ncyc, outer_hist=hist, timers=tim.t, levels=levels,
