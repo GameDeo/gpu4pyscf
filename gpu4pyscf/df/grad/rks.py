@@ -49,9 +49,15 @@ def energy_ee(ks_grad, mol=None, dm=None, verbose=None):
         exc1 *= 2
         exc1 += exc
     else:
-        with mixed_precision.grad_stage(mf):
-            exc, exc1 = rks_grad.get_exc(ni, mol, grids, mf.xc, dm, verbose=log)
-        exc1 *= 2
+        cached = getattr(mf, '_mf_xc_grad', None)     # fused XC gradient of the multi-fidelity SCF's last pass
+        if (cached is not None and grids is mf.grids and
+                float(cupy.abs(cupy.asarray(dm) - cached[1]).max()) < 1e-10):
+            exc1 = np.array(cached[0])
+            log.debug('XC gradient taken from the fused multi-fidelity pass')
+        else:
+            with mixed_precision.grad_stage(mf):
+                exc, exc1 = rks_grad.get_exc(ni, mol, grids, mf.xc, dm, verbose=log)
+            exc1 *= 2
     t0 = log.timer('vxc total', *t0)
 
     if mf.do_nlc():

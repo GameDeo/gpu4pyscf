@@ -518,6 +518,165 @@ def _eval_rho2_crt(ao, cpos, xctype):
         crt_gemm.gemm_planes(view, ctT, XC_CRT_MODULI, out=c4[k])
     return crt_gemm.rho_from_cT(c4, ngrids, xctype)
 
+_BUILD_Y_SRC = r'''
+extern "C" __global__ void build_Y(double* __restrict__ Y, const double* __restrict__ c, const double* __restrict__ u,
+                                   long long ngp, long long nocc, long long ng, long long ustride, long long p0,
+                                   int mode)
+{
+    // c: [ncomp][ngp][nocc] half-transformed orbitals (grid points as rows), u: [nvar][ustride] = vxc * weights
+    // Y: [ncomp][nocc][ng] with  Y0 = u0 psi0 + sum_x ux psix,  Yx = ux psi0 + 1/2 u4 psix   (mode 2: MGGA)
+    //                            Y0 = u0 psi0 + sum_x ux psix,  Yx = ux psi0                 (mode 1: GGA)
+    //                            Y0 = u0 psi0                                                 (mode 0: LDA)
+    long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nocc * ng) return;
+    long long i = t / ng, g = t - i * ng;
+    long long cs = ngp * nocc;
+    double p0v = c[g * nocc + i];
+    double u0 = u[p0 + g];
+    if (mode == 0) { Y[i * ng + g] = u0 * p0v; return; }
+    double px = c[cs + g * nocc + i], py = c[2 * cs + g * nocc + i], pz = c[3 * cs + g * nocc + i];
+    double ux = u[ustride + p0 + g], uy = u[2 * ustride + p0 + g], uz = u[3 * ustride + p0 + g];
+    double ht = (mode == 2) ? 0.5 * u[4 * ustride + p0 + g] : 0.0;
+    long long ys = nocc * ng;
+    Y[i * ng + g] = u0 * p0v + ux * px + uy * py + uz * pz;
+    Y[ys + i * ng + g] = ux * p0v + ht * px;
+    Y[2 * ys + i * ng + g] = uy * p0v + ht * py;
+    Y[3 * ys + i * ng + g] = uz * p0v + ht * pz;
+}
+'''
+_build_y_kernel = None
+
+
+def _half_transform(ao, cpos, xctype, crt):
+    '''c [ncomp, ngp, nocc] = (ao_k^T cpos) with grid points as rows (INT8-CRT or FP64).'''
+    ngrids = ao.shape[-1]
+    nocc = cpos.shape[1]
+    ncomp = 1 if xctype == 'LDA' else 4
+    if crt:
+        from gpu4pyscf.lib import crt_gemm
+        ctT = cupy.ascontiguousarray(cpos.T)
+        P1 = (ngrids + 15) // 16 * 16
+        c4 = cupy.empty((ncomp, P1, nocc))
+        for k in range(ncomp):
+            a = ao if ao.ndim == 2 else ao[k]
+            a = cupy.ascontiguousarray(a)
+            nk = a.shape[0]
+            view = cupy.lib.stride_tricks.as_strided(a, shape=(1, ngrids, nk), strides=(0, a.itemsize, ngrids * a.itemsize))
+            crt_gemm.gemm_planes(view, ctT, XC_CRT_MODULI, out=c4[k])
+        return c4
+    c4 = cupy.empty((ncomp, ngrids, nocc))
+    for k in range(ncomp):
+        a = ao if ao.ndim == 2 else ao[k]
+        cupy.matmul(a.T, cpos, out=c4[k])
+    return c4
+
+
+def nr_rks_vco(ni, mol, grids, xc_code, mo_coeff, mo_occ, with_grad=False, group_bytes=8e8):
+    """Closed-shell XC energy and the occupied projection V_xc @ C_occ (no nao x nao matrix is formed).
+    Returns (nelec, excsum, vc) with vc [nao, nocc] in the original AO order.  Same contractions as nr_rks
+    (XC_PRECISION 'crt' -> INT8-CRT GEMMs, otherwise FP64); single device.
+    V C = A0 [u0 psi0 + sum_x ux psix] + sum_x Ax [ux psi0 + 1/2 u4 psix],   psi_k = A_k^T C,  u = vxc * w.
+    with_grad: also the XC nuclear gradient (no grid response) of the same density, [natm, 3], i.e. 2 x the
+    rks_grad.get_exc term.  It is the same contraction with A_k replaced by d/dr_n A_k (A_0 = phi, A_x = d_x phi):
+    G_n = sum_k (d_n A_k) Y_k^T,  exc1[mu, n] = sum_i C_mu,i G_n[mu, i]   (Y built from occupation-weighted psi).
+    One pass over the grid blocks: the AO values of a group of blocks (~group_bytes) are kept while libxc runs once
+    for the group, so each AO block is evaluated once (deriv 2 when with_grad)."""
+    global _build_y_kernel
+    from gpu4pyscf.lib import crt_gemm
+    xctype = ni._xc_type(xc_code)
+    assert xctype in ('LDA', 'GGA', 'MGGA')
+    opt = getattr(ni, 'gdftopt', None)
+    if opt is None:
+        ni.build(mol, grids.coords)
+        opt = ni.gdftopt
+    _sorted_mol = opt._sorted_mol
+    mo_occ = cupy.asarray(mo_occ)
+    occ = mo_occ > 0
+    focc = cupy.asnumpy(mo_occ[occ])
+    assert np.allclose(focc, focc[0]), 'nr_rks_vco: equal occupations only'
+    C = opt.sort_orbitals(cupy.asarray(mo_coeff)[:, occ], axis=[0])
+    C = cupy.ascontiguousarray(C)
+    nao, nocc = C.shape
+    sq = float(np.sqrt(focc[0]))
+    cpos = C * sq
+    crt = XC_PRECISION == 'crt'
+    ao_deriv = 0 if xctype == 'LDA' else 1
+    nvar = {'LDA': 1, 'GGA': 4, 'MGGA': 5}[xctype]
+    mode = {'LDA': 0, 'GGA': 1, 'MGGA': 2}[xctype]
+    ncomp = 1 if mode == 0 else 4
+    if _build_y_kernel is None:
+        _build_y_kernel = cupy.RawKernel(_BUILD_Y_SRC, 'build_Y')
+    weights = cupy.asarray(grids.weights)
+    vc = cupy.zeros((nao, nocc))
+    if with_grad:
+        assert xctype in ('GGA', 'MGGA')
+        exc1_ao = cupy.zeros((nao, 3))
+        dcomp = ((1, 4, 5, 6), (2, 5, 7, 8), (3, 6, 8, 9))
+    acc = {'nelec': 0.0, 'exc': 0.0}
+    group = []
+
+    def flush():
+        if not group:
+            return
+        q0 = group[0][3]
+        q1 = group[-1][3] + group[-1][4]
+        nq = q1 - q0
+        rho = cupy.empty((nvar, nq))
+        for ao, idx, c4, p0, ng in group:
+            rho[:, p0 - q0:p0 - q0 + ng] = crt_gemm.rho_from_cT(c4, ng, xctype)
+        w = weights[q0:q1]
+        den = rho[0] * w
+        acc['nelec'] += float(den.sum())
+        exc, vxc = ni.eval_xc_eff(xc_code, rho, deriv=1, xctype=xctype, spin=0)[:2]
+        acc['exc'] += float(cupy.dot(den, cupy.asarray(exc)).get())
+        u = cupy.asarray(vxc, order='C') * w
+        rho = exc = vxc = den = None
+        for ao, idx, c4, p0, ng in group:
+            Y = cupy.empty((ncomp, nocc, ng))
+            tot = nocc * ng
+            _build_y_kernel(((tot + 255) // 256,), (256,),
+                            (Y, c4, u, np.int64(c4.shape[1]), np.int64(nocc), np.int64(ng), np.int64(nq),
+                             np.int64(p0 - q0), np.int32(mode)))
+            a3 = ao[None] if ao.ndim == 2 else ao[:ncomp]
+            if crt:
+                out = crt_gemm.gemm_nt(cupy.ascontiguousarray(a3), Y, XC_CRT_MODULI)
+            else:
+                out = cupy.einsum('kig,kag->ia', a3, Y)
+            vc[idx] += out
+            if with_grad:
+                cp_sub = cpos[idx]
+                for n in range(3):
+                    dA = ao[list(dcomp[n])]
+                    if crt:
+                        gn = crt_gemm.gemm_nt(dA, Y, XC_CRT_MODULI)
+                    else:
+                        gn = cupy.einsum('kig,kag->ia', dA, Y)
+                    exc1_ao[idx, n] += (gn * cp_sub).sum(axis=1)
+        group.clear()
+
+    gbytes = 0
+    p0 = 0
+    for ao, idx, weight, _ in ni.block_loop(_sorted_mol, grids, nao, 2 if with_grad else ao_deriv, max_memory=None):
+        ng = weight.size
+        c4 = _half_transform(ao, cupy.ascontiguousarray(cpos[idx]), xctype, crt)
+        aoc = ao.copy()                     # block_loop reuses its buffer
+        group.append((aoc, idx, c4, p0, ng))
+        gbytes += aoc.nbytes + c4.nbytes
+        p0 += ng
+        if gbytes > group_bytes:
+            flush()
+            gbytes = 0
+    flush()
+    vc /= sq
+    vc = opt.unsort_orbitals(vc, axis=[0])
+    if with_grad:
+        from gpu4pyscf.grad.rks import _reduce_to_atom
+        # - sign because nabla_X = -nabla_x; x 2 as in energy_ee
+        exc1 = -2 * _reduce_to_atom(_sorted_mol, exc1_ao)
+        return acc['nelec'], acc['exc'], vc, exc1
+    return acc['nelec'], acc['exc'], vc
+
+
 def _vmat_block_fp32(ao, wv, xctype, out):
     '''FP32 version of the per-block XC matrix build; ao [comp,nao,ng], wv [nvar,ng] (float32).
     Returns the (unsymmetrized) FP32 block in `out`.'''

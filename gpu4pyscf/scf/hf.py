@@ -400,6 +400,14 @@ def scf(mf, dm0=None, **kwargs):
         # Initial guess from existing wavefunction
         dm0 = mf.make_rdm1()
 
+    if getattr(mf, 'multifidelity', False) and mf.max_cycle > 0:
+        # defect-corrected multi-fidelity SCF (closed-shell DF-RKS); see scf/multifidelity.py
+        from gpu4pyscf.scf import multifidelity
+        multifidelity.kernel(mf, dm0, **kwargs)
+        logger.timer(mf, 'SCF', *cput0)
+        mf._finalize()
+        return mf.e_tot
+
     conv_tol_grad = mf.conv_tol_grad
     if getattr(mf, 'mixed_precision', False) and mf.max_cycle > 0:
         # Reduced-precision stage 1; the regular FP64 SCF below polishes its density.

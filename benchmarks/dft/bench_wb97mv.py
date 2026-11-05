@@ -110,6 +110,8 @@ def main():
     p.add_argument('--ref', default=None, help='json summary of a reference run to compare against')
     p.add_argument('--tol', type=float, default=1e-7, help='|E - E_ref| tolerance in Eh')
     p.add_argument('--set', nargs='*', default=[], help='extra mf attributes, e.g. --set nlcgrids.level=1')
+    p.add_argument('--multifidelity', default=None,
+                   help="multi-fidelity SCF (scf/multifidelity.py): '{}' or a dict literal of options")
     args = p.parse_args()
 
     import gpu4pyscf
@@ -149,6 +151,8 @@ def main():
         if args.scheme:
             mf.mixed_precision['scheme'] = args.scheme
     mf.max_cycle = args.max_cycle
+    if args.multifidelity is not None:
+        mf.multifidelity = eval(args.multifidelity) or True
     for s in args.set:
         k, v = s.split('=')
         obj = mf
@@ -207,6 +211,15 @@ def main():
         print('WARNING: timers that never fired:', dead)
     if args.grad:
         print(f'gradient time: {res["grad_time"]:.2f} s')
+    st = getattr(mf, 'multifidelity_stats', None)
+    if st:
+        print('multi-fidelity cycles', st['cycles'], 'conv_tol_grad %.1e' % st['conv_tol_grad'])
+        for g_, e_ in st['outer_hist']:
+            print(f'  outer |g| = {g_:.3e}  E = {e_:.12f}')
+        for k_, (sec_, n_) in sorted(st['timers'].items(), key=lambda kv: -kv[1][0]):
+            print(f'  {k_:20s} {sec_:8.3f} s {n_:5d} calls {sec_ / max(n_, 1):8.4f} s/call')
+        res['multifidelity'] = {'cycles': st['cycles'], 'outer_hist': st['outer_hist'],
+                                'timers': {k_: list(v_) for k_, v_ in st['timers'].items()}, 'wall': st['wall']}
 
     status = 0
     if args.ref:
