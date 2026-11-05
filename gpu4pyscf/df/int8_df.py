@@ -159,6 +159,7 @@ class Int8DF:
         self.nmod = nmod
         self.Q = self.s = None
         self._dense = None
+        self.host_block_bytes = 2.5e8     # device buffer per streamed block of the host-resident J
 
     def build(self, mem_frac=0.25):
         from pyscf.df import addons
@@ -267,19 +268,43 @@ class Int8DF:
             coldot(((self.npairs + 255) // 256,), (256,), (self.Q, rho, self.s, jp, npairs, np.int32(self.naux)),
                    shared_mem=1024 * 8)
         else:
-            # pinned host storage: two streamed passes over aux-row blocks
-            nL = max(_GEMV_ROWS, int(2.5e8 / (self.npairs * self.qdt.itemsize)) // _GEMV_ROWS * _GEMV_ROWS)
-            qd = cp.empty((min(nL, self.naux), self.npairs), dtype=self.qdt)
-            for L0, n, hv in self._host_iter(nL):
-                qd[:n].set(hv)
-                rowdot(((n + _GEMV_ROWS - 1) // _GEMV_ROWS,), (256,), (qd, u, rho[L0:], npairs, np.int32(n)))
+            # pinned host storage, one streamed pass: the tensor is metric-orthonormalised (B = L^-1 (P|mn)), so
+            # rho_L = B_L . D depends on row L only and J = sum_L rho_L B_L accumulates block by block.  Two device
+            # buffers on a copy stream: the transfer of block k+1 overlaps the GEMVs of block k.
+            nL = int(self.host_block_bytes / (self.npairs * self.qdt.itemsize)) // _GEMV_ROWS * _GEMV_ROWS
+            nL = max(_GEMV_ROWS, nL)
+            nbuf = min(nL, self.naux)
+            qd = [cp.empty((nbuf, self.npairs), dtype=self.qdt) for _ in range(2)]
             jp = cp.zeros(self.npairs)
             part = cp.empty(self.npairs)
-            for L0, n, hv in self._host_iter(nL):
-                qd[:n].set(hv)
-                coldot(((self.npairs + 255) // 256,), (256,), (qd, rho[L0:L0 + n].copy(), self.s, part, npairs,
+            cstream = cp.cuda.Stream(non_blocking=True)
+            main = cp.cuda.get_current_stream()
+            blocks = list(self._host_iter(nL))
+            done = [None, None]
+
+            def upload(k):
+                b = k % 2
+                if done[b] is not None:
+                    cstream.wait_event(done[b])           # the GEMVs reading this buffer have finished
+                _, n, hv = blocks[k]
+                with cstream:
+                    qd[b][:n].set(hv)
+                ev = cp.cuda.Event()
+                ev.record(cstream)
+                return ev
+            ready = upload(0) if blocks else None
+            for k, (L0, n, hv) in enumerate(blocks):
+                b = k % 2
+                main.wait_event(ready)
+                nxt = upload(k + 1) if k + 1 < len(blocks) else None
+                rowdot(((n + _GEMV_ROWS - 1) // _GEMV_ROWS,), (256,), (qd[b], u, rho[L0:], npairs, np.int32(n)))
+                coldot(((self.npairs + 255) // 256,), (256,), (qd[b], rho[L0:L0 + n].copy(), self.s, part, npairs,
                                                               np.int32(n)), shared_mem=1024 * 8)
                 jp += part
+                done[b] = cp.cuda.Event()
+                done[b].record(main)
+                ready = nxt
+            main.synchronize()
             qd = part = None
         nao = self.nao
         J = cp.zeros((nao, nao))

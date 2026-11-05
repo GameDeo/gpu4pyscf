@@ -443,8 +443,9 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                 raise RuntimeError('int3c2e_ejk_ip1 failed')
         if tab_lo is not None:
             t_idx, t_off, t_loc = tab_lo
-            ejk32 = cp.zeros((mol.natm, 3), dtype=np.float32)
-            ejk32_aux = cp.zeros((mol.natm, 3), dtype=np.float32)
+            # FP64 accumulators (gen_f32.py ACC64): FP32 integrals, FP64 sums over aux shells and atoms
+            ejk32 = cp.zeros((mol.natm, 3))
+            ejk32_aux = cp.zeros((mol.natm, 3))
             comp32 = compressed.astype(np.float32)
             err = _lib_f32().sum_ejk_int3c2e_ip1_f32(
                 ctypes.cast(ejk32.data.ptr, ctypes.c_void_p),

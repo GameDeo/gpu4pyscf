@@ -79,9 +79,10 @@ DEFAULTS = {
     'crt_moduli_cderi': 15,       # DF-tensor build GEMM (aux-metric transform): static, so always accurate (~1e-12)
     'grad_gamma_ndig': 6,         # DF J/K gradient: pseudo-density build Gamma = C (Z C^T) as Ozaki-I INT8 product
                                   # (reduction length nocc; 6 digits ~ 41 bits; gradient unchanged on BPA)
-    'grad_fp32_frac': 0.01,       # ... and the shell pairs carrying the smallest 1 % of the |Gamma| weight in the FP32 copy
-                                  # of the Rys derivative kernel.  Extra gradient error on BPA: ~0 at 1 %, 3e-7 at 3 %,
-                                  # 2.5e-6 at 10 %, 2e-5 at 30 %, 2.3e-4 all-FP32 (0 = off)
+    'grad_fp32_frac': 0.1,        # ... and the shell pairs carrying the smallest 10 % of the |Gamma| weight in the FP32 copy
+                                  # of the Rys derivative kernel (FP32 integrals, FP64 sums over aux shells and atoms).
+                                  # Extra gradient error on BPA: 7.5e-9 at 1 %, 1.6e-7 at 10 %, 7.1e-7 at 30 %,
+                                  # 6.2e-6 all-FP32 (0 = off)
     'final_vv10': 'fp32',         # VV10 precision in the final stage of the 'crt' scheme (FP32 error ~1e-9 in E)
     'k_precision': None,          # DF-K GEMMs: 'fp32' | 'tf32x3'; None -> auto by GPU generation
     'xc_precision': None,         # XC grid GEMMs (rho, vmat): same choices
