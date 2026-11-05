@@ -66,8 +66,9 @@ DEFAULTS = dict(
     medium_factor=3.,             # est > cheap_factor * tol -> cheap, > medium_factor * tol -> medium, else exact
     exact_k='stored',             # 'stored': DF tensors in memory; 'direct': two streamed integral passes per outer
     direct_nmod=(15, 11),         # INT8-CRT moduli of the direct passes (pass 1 is amplified by J^-1); None: FP64
-    inner_eig='rotate',           # 'full': diagonalise every inner cycle; 'rotate': preconditioned occupied-subspace
-    rotate_steps=2,               # rotation (pseudo-diagonalisation, no nao^3 step) with the stage-1 virtuals as preconditioner
+    inner_eig='auto',             # 'full': diagonalise every inner cycle; 'rotate': preconditioned occupied-subspace
+    rotate_steps=2,               # rotation (pseudo-diagonalisation, no nao^3 step) with the stage-1 virtuals as preconditioner;
+    rotate_nao=1500,              # 'auto': rotate when nao > rotate_nao (BPA, nao 623: only 0.2 s gain, kept on 'full')
     precision=None,               # dict for mixed_precision.fast_precision; default from mf.mixed_precision / GPU
 )
 
@@ -384,7 +385,8 @@ def _rotate(fd, C, e, s1e, nocc, steps):
         Co = Co @ U
         G = G @ U
         Cv = Cv0 - Co @ (Co.T @ SCv0)
-        kappa = (Cv.T @ G) / (eo[None, :] - ev[:, None])
+        # guard: a stale reference virtual energy close to (or below) an occupied one would blow up the first-order step
+        kappa = (Cv.T @ G) / cupy.minimum(eo[None, :] - ev[:, None], -0.05)
         Co = Co + Cv @ kappa
         w, V = cupy.linalg.eigh(Co.T @ s1e @ Co)
         Co = Co @ ((V / cupy.sqrt(w)) @ V.T)
@@ -506,6 +508,8 @@ def kernel(mf, dm0=None, **kwargs):
         occ[:nocc] = 2
         return e, C, occ
 
+    if opt['inner_eig'] == 'auto':
+        opt['inner_eig'] = 'rotate' if mol.nao > opt['rotate_nao'] else 'full'
     Sinv = eig.X @ eig.X.T if opt['inner_eig'] == 'rotate' else None
 
     def proj_grad(X_, Co_):
