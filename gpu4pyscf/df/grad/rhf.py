@@ -84,9 +84,13 @@ def _gamma_oz1(dm_oo, fl, fr, out3, alpha, beta):
         crt_gemm.ozaki1_gemm_nt(fr, bt[c0:c1], ndig, out=out2[:, c0:c1], alpha=alpha, beta=beta)
 
 
+_abs_rowsum = cp.ReductionKernel('T x', 'T y', 'abs(x)', 'a + b', 'y = a', '0', 'abs_rowsum')
+
+
 def _tier_split(compressed, ao_pair_loc, group_sp, frac):
     '''Boolean mask over shell pairs (FP32 tier) from the Gamma weights of this aux batch.'''
-    rowl1 = abs(compressed).sum(axis=1)
+    # fused |x| row sums: abs(compressed) would allocate a copy of the whole batch (GPU OOM at Taxol size)
+    rowl1 = _abs_rowsum(compressed, axis=1)
     cs = cp.concatenate([cp.zeros(1), cp.cumsum(rowl1)])
     w = cs[ao_pair_loc[1:]] - cs[ao_pair_loc[:-1]]
     order = cp.argsort(w)
@@ -252,7 +256,9 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
 
     mem_free = get_avail_mem(exclude_memory_pool=True)
     mem_avail = mem_free - naux*nocc**2*8 - nao**2*8
-    batch_size = max(1, min(naux, int(mem_avail*.5/(nao_pair*8))))
+    # the FP32 tier keeps an FP32 copy of each batch (+50 %)
+    batch_frac = .5 if not (GRAD_TIERS and _lib_f32()) else .33
+    batch_size = max(1, min(naux, int(mem_avail*batch_frac/(nao_pair*8))))
     eval_j3c, aux_sorting, _, aux_offsets = int3c2e_opt.int3c2e_evaluator(
         aux_batch_size=batch_size, reorder_aux=True, cart=True,
         omega=omega, lr_factor=lr_factor, sr_factor=sr_factor)
