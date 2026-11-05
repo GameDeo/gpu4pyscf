@@ -21,6 +21,7 @@ mf.nlcgrids.atom_grid = (50, 194)
 mf.conv_tol = 1e-9
 mf.mixed_precision = {'scheme': 'crt'}
 mf.multifidelity = dict(opts) or True
+print('options', mf.multifidelity, flush=True)
 sync(); t0 = time.perf_counter()
 e = mf.kernel()
 sync(); ts = time.perf_counter() - t0

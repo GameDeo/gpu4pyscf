@@ -101,13 +101,22 @@ void q8_unpack16(const signed char* __restrict__ Q, const float* __restrict__ s,
 _mod = None
 
 
-def _kern(name, bits=8):
-    '''q8_* kernels on int8 storage; bits=16: the same kernels on int16 storage'''
+def _kern(name, bits=8, out32=False):
+    '''q8_* kernels on int8 storage; bits=16 / 32: the same kernels on int16 / float32 storage;
+    out32: the unpack kernel writes float32 instead of FP16'''
     global _mod
     if _mod is None:
-        src16 = _KERNELS.replace('signed char', 'short').replace('void q8_', 'void q16_')
-        _mod = cp.RawModule(code='#include <cuda_fp16.h>\n' + _KERNELS + src16, options=('-std=c++14',))
-    return _mod.get_function(name if bits == 8 else name.replace('q8_', 'q16_'))
+        srcs = []
+        for b, t in ((8, 'signed char'), (16, 'short'), (32, 'float')):
+            src = _KERNELS.replace('signed char', t).replace('void q8_', 'void q%d_' % b)
+            src32 = src[src.index('extern "C" __global__\nvoid q%d_unpack16' % b):]
+            src32 = src32.replace('__half', 'float').replace('__float2half(v)', 'v').replace('_unpack16', '_unpack32')
+            srcs += [src, src32]
+        _mod = cp.RawModule(code='#include <cuda_fp16.h>\n' + '\n'.join(srcs), options=('-std=c++14',))
+    name = name.replace('q8_', 'q%d_' % bits)
+    if out32:
+        name = name.replace('_unpack16', '_unpack32')
+    return _mod.get_function(name)
 
 
 def _sym_half_metric(auxmol, aux_sorting, omega, lr_factor, sr_factor):
@@ -181,8 +190,8 @@ class Int8DF:
             aux_coef, _ = gdf._decompose_j2c(intopt.auxmol, aux_sorting, omega, lr, sr)
         naux = aux_coef.shape[1]
         self.naux, self.npairs, self.nao = naux, npairs, mol.nao
-        qdt = np.int8 if self.bits == 8 else np.int16
-        qmax = 127. if self.bits == 8 else 32767.
+        qdt = {8: np.int8, 16: np.int16, 32: np.float32}[self.bits]
+        qmax = {8: 127., 16: 32767., 32: 1.}[self.bits]
         if self.host == 'auto':
             self.host = naux * npairs * (self.bits // 8) > 0.5 * get_avail_mem(exclude_memory_pool=False)
         if self.host:
@@ -193,6 +202,7 @@ class Int8DF:
         self.s = cp.empty(npairs, dtype=np.float32)
         old = gdf.CDERI_CRT_MODULI
         gdf.CDERI_CRT_MODULI = self.nmod
+        amax32 = 0.
         try:
             for batch_id in range(len(ao_pair_offsets) - 1):
                 j3c = eval_j3c(batch_id)
@@ -200,10 +210,15 @@ class Int8DF:
                 blk = cp.empty((j3c.shape[0], naux))
                 gdf._j3c_dot(j3c, aux_coef, blk)
                 j3c = None
-                amax = abs(blk).max(axis=1)
-                sc = cp.where(amax > 0, amax / qmax, 1.)
-                self.s[p0:p1] = sc
-                q = cp.rint(blk / sc[:, None]).astype(qdt).T
+                if self.bits == 32:
+                    self.s[p0:p1] = 1.
+                    amax32 = max(amax32, float(abs(blk).max()))
+                    q = blk.astype(np.float32).T
+                else:
+                    amax = abs(blk).max(axis=1)
+                    sc = cp.where(amax > 0, amax / qmax, 1.)
+                    self.s[p0:p1] = sc
+                    q = cp.rint(blk / sc[:, None]).astype(qdt).T
                 blk = None
                 if self.host:
                     self.Q[:, p0:p1] = q.get()
@@ -217,8 +232,7 @@ class Int8DF:
         diag = cp.zeros(npairs, dtype=bool)
         diag[cp.asarray(diag_addrs)] = True
         self.pair_w = cp.where(diag, 1., 2.)          # D_p weights of the symmetric pair sum
-        self.amax = float(self.s.max()) * qmax
-        log.debug('Int8DF: mol.omega %s auxmol.omega %s rsh %s', mol.omega, auxmol.omega, (omega, lr, sr))
+        self.amax = amax32 if self.bits == 32 else float(self.s.max()) * qmax
         log.timer('Int8DF build naux=%d npairs=%d bits=%d host=%s (%.2f GB)' % (
             naux, npairs, self.bits, self.host, naux * npairs * self.bits / 8e9), *t0)
         return self
@@ -226,16 +240,35 @@ class Int8DF:
     # -------------------------------------------------------------- J
     def j(self, dm):
         '''J_s(dm) (FP64 accumulation over the INT8 tensor).'''
-        assert not self.host
         dm = cp.asarray(dm)
         u = dm[self.rows, self.cols] * self.pair_w * self.s
         rho = cp.empty(self.naux)
-        nb = (self.naux + _GEMV_ROWS - 1) // _GEMV_ROWS
-        _kern('q8_rowdot', self.bits)((nb,), (256,), (self.Q, u, rho, np.int64(self.npairs), np.int32(self.naux)))
-        jp = cp.empty(self.npairs)
-        _kern('q8_coldot', self.bits)(((self.npairs + 255) // 256,), (256,),
-                           (self.Q, rho, self.s, jp, np.int64(self.npairs), np.int32(self.naux)),
-                           shared_mem=1024 * 8)
+        npairs = np.int64(self.npairs)
+        rowdot = _kern('q8_rowdot', self.bits)
+        coldot = _kern('q8_coldot', self.bits)
+        if not self.host:
+            nb = (self.naux + _GEMV_ROWS - 1) // _GEMV_ROWS
+            rowdot((nb,), (256,), (self.Q, u, rho, npairs, np.int32(self.naux)))
+            jp = cp.empty(self.npairs)
+            coldot(((self.npairs + 255) // 256,), (256,), (self.Q, rho, self.s, jp, npairs, np.int32(self.naux)),
+                   shared_mem=1024 * 8)
+        else:
+            # pinned host storage: two streamed passes over aux-row blocks
+            nL = max(_GEMV_ROWS, int(2.5e8 / (self.npairs * self.Q.itemsize)) // _GEMV_ROWS * _GEMV_ROWS)
+            qd = cp.empty((min(nL, self.naux), self.npairs), dtype=self.Q.dtype)
+            for L0 in range(0, self.naux, nL):
+                n = min(nL, self.naux - L0)
+                qd[:n].set(self.Q[L0:L0 + n])
+                rowdot(((n + _GEMV_ROWS - 1) // _GEMV_ROWS,), (256,), (qd, u, rho[L0:], npairs, np.int32(n)))
+            jp = cp.zeros(self.npairs)
+            part = cp.empty(self.npairs)
+            for L0 in range(0, self.naux, nL):
+                n = min(nL, self.naux - L0)
+                qd[:n].set(self.Q[L0:L0 + n])
+                coldot(((self.npairs + 255) // 256,), (256,), (qd, rho[L0:L0 + n].copy(), self.s, part, npairs,
+                                                              np.int32(n)), shared_mem=1024 * 8)
+                jp += part
+            qd = part = None
         nao = self.nao
         J = cp.zeros((nao, nao))
         J[self.rows, self.cols] = jp
@@ -244,14 +277,17 @@ class Int8DF:
 
     # -------------------------------------------------------------- K
     def _blocks(self, nL=None):
-        '''yield (L0, L1, dense FP16 view (nL * nao, naop) of B[L0:L1] / self.amax)'''
+        '''yield (L0, L1, dense view (nL * nao, naop) of B[L0:L1] / self.amax): FP16 for 8-bit storage, FP32 for
+        16/32-bit storage (FP16 would discard their extra precision)'''
         nao = self.nao
         naop = (nao + 7) // 8 * 8
+        dt = np.float16 if self.bits == 8 else np.float32
+        isz = np.dtype(dt).itemsize
         if nL is None:
             mem = get_avail_mem(exclude_memory_pool=True)
-            nL = max(8, min(self.naux, int(mem * 0.2 / (2 * nao * naop * 3))))
-        if self._dense is None or self._dense.shape[0] < nL:
-            self._dense = cp.zeros((nL, nao, naop), dtype=np.float16)   # unscreened pairs stay zero
+            nL = max(8, min(self.naux, int(mem * 0.2 / (isz * nao * naop * 3))))
+        if self._dense is None or self._dense.shape[0] < nL or self._dense.dtype != dt:
+            self._dense = cp.zeros((nL, nao, naop), dtype=dt)            # unscreened pairs stay zero
         buf = self._dense
         inv = 1. / self.amax
         qdev = cp.empty((nL, self.npairs), dtype=self.Q.dtype) if self.host else None
@@ -263,7 +299,7 @@ class Int8DF:
                 src, l0 = qdev, 0
             else:
                 src, l0 = self.Q, L0
-            _kern('q8_unpack16', self.bits)(((tot + 255) // 256,), (256,),
+            _kern('q8_unpack16', self.bits, self.bits != 8)(((tot + 255) // 256,), (256,),
                                  (src, self.s, self.rows, self.cols, buf, np.int64(self.npairs), np.int32(l0),
                                   np.int32(n), np.int32(nao), np.int32(naop), np.float32(inv)))
             yield L0, L0 + n, buf[:n].reshape(n * nao, naop), naop
@@ -279,6 +315,8 @@ class Int8DF:
         nao, n = A.shape
         npad = (n + 7) // 8 * 8
         m = 2 if Bm is not None else 1
+        if self.bits != 8:
+            return self._k_pairs32(A, Bm, half_b)
         P = cp.zeros((nao, nao), dtype=np.float32)
         # A and Bm scaled separately (an increment dC is orders of magnitude below C: one common FP16 scale would
         # push it into the subnormal range)
@@ -305,3 +343,27 @@ class Int8DF:
             b16, sb = (a16, sa) if Bm is None else _to16(Yb)
             P += gemm16_nt(a16, b16) * (sa * sb)
         return P.astype(np.float64) * (sA * self.amax) ** 2
+
+    def _k_pairs32(self, A, Bm=None, half_b=None):
+        """k_pairs with FP32 dense blocks and FP32 GEMMs (16/32-bit storage)."""
+        nao, n = A.shape
+        m = 2 if Bm is not None else 1
+        naop = (nao + 7) // 8 * 8
+        Ct = cp.zeros((naop, m * n), dtype=np.float32)
+        Ct[:nao, :n] = A
+        if Bm is not None:
+            Ct[:nao, n:] = Bm
+        P = cp.zeros((nao, nao), dtype=np.float32)
+        for L0, L1, B32, naop in self._blocks():
+            nL = L1 - L0
+            X = (B32 @ Ct).reshape(nL, nao, m, n)
+            Ya = cp.ascontiguousarray(X[:, :, 0].transpose(1, 0, 2)).reshape(nao, nL * n)
+            if Bm is None:
+                Yb = Ya
+            else:
+                Yb = cp.ascontiguousarray(X[:, :, 1].transpose(1, 0, 2)).reshape(nao, nL * n)
+                if half_b:
+                    Yb += half_b * Ya
+            X = None
+            P += Ya @ Yb.T
+        return P.astype(np.float64) * self.amax ** 2
