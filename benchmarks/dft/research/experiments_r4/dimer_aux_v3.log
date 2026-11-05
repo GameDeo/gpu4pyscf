@@ -1,0 +1,12 @@
+spec lmax1,mix,fp16inc nao 86 naux 100 tensor rows 100 (exact: 2 x 226)
+  surrogate K rel err 2.53e-02
+ENERGY -152.866927614179
+RESULT lmax1,mix,fp16inc naux_rows 100 stage1 8 outer ['9.4e-02', '1.1e-03', '1.0e-05', '9.4e-08'] inner [4, 5, 5] surrogateK 22
+spec lmax0,mix,fp16inc nao 86 naux 28 tensor rows 28 (exact: 2 x 226)
+  surrogate K rel err 8.71e-02
+ENERGY -152.866927614178
+RESULT lmax0,mix,fp16inc naux_rows 28 stage1 8 outer ['3.4e-01', '6.9e-03', '1.6e-04', '5.0e-06', '2.0e-07', '8.7e-09'] inner [3, 4, 4, 5, 13] surrogateK 37
+spec svpri,mix,fp16inc nao 86 naux 152 tensor rows 152 (exact: 2 x 226)
+  surrogate K rel err 3.28e-03
+ENERGY -152.866927614178
+RESULT svpri,mix,fp16inc naux_rows 152 stage1 8 outer ['1.2e-02', '1.0e-04', '1.0e-06', '9.3e-09'] inner [4, 5, 4] surrogateK 21
