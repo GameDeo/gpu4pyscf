@@ -312,9 +312,13 @@ def grad_stage(mf):
         yield
         return
     from gpu4pyscf.grad import rks as rks_grad
-    old = rks_grad.XC_GRAD_CRT_MODULI
+    from gpu4pyscf.dft import numint
+    from gpu4pyscf.df.grad import rhf as df_rhf_grad
+    old = rks_grad.XC_GRAD_CRT_MODULI, numint.VV10_PRECISION, df_rhf_grad.JK_GRAD_CRT_MODULI
     rks_grad.XC_GRAD_CRT_MODULI = opt['crt_moduli_final']
+    numint.VV10_PRECISION = opt['final_vv10']        # the NLC gradient uses the SCF's final VV10 precision
+    df_rhf_grad.JK_GRAD_CRT_MODULI = opt['crt_moduli_final'] if opt.get('jk_grad_crt', False) else 0   # off: slower and the J^-1 metric amplifies the 11-moduli error (5e-6 Eh/bohr on BPA)
     try:
         yield
     finally:
-        rks_grad.XC_GRAD_CRT_MODULI = old
+        rks_grad.XC_GRAD_CRT_MODULI, numint.VV10_PRECISION, df_rhf_grad.JK_GRAD_CRT_MODULI = old

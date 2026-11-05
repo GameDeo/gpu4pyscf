@@ -51,7 +51,8 @@ DEFAULTS = dict(
     max_inner=40,
     max_stage1=60,
     fine_vco=True,                # fine XC as V_xc C_occ (occupied projection) instead of the full matrix
-    fuse_grad=True,               # XC nuclear gradient in the (predicted) last fine pass; used by the DF-RKS gradient
+    fuse_grad=True,
+    coarse_xc='inc',              # 'inc': cached-AO FP32 increments of the coarse XC (stage 1: FP32 absolute); 'exact'               # XC nuclear gradient in the (predicted) last fine pass; used by the DF-RKS gradient
     eig='fp64',                   # 'fp64' | 'fp32oa' (FP32 syevd + Ogita-Aishima; slower than syevd at nao~600 on T4)
     precision=None,               # dict for mixed_precision.fast_precision; default from mf.mixed_precision / GPU
 )
@@ -127,8 +128,22 @@ class SurrogateK:
         self.mode = mode
         self.B = None
         self.s1e = None
+        self._built = False
 
     def k_ref(self, dm):
+        if not self._built:
+            # the surrogate tensor is fixed for the whole SCF, so its build precision does not affect exactness
+            # (any fixed B gives a smooth linear operator): build it with fewer INT8 moduli than the exact tensor
+            from gpu4pyscf.df import df as gdf_mod
+            old = gdf_mod.CDERI_CRT_MODULI
+            gdf_mod.CDERI_CRT_MODULI = min(old, 8)
+            try:
+                with self.dfs.range_coulomb(self.kw['omega'], self.kw['lr_factor'], self.kw['sr_factor']) as d:
+                    if d._cderi is None:
+                        d.build(**self.kw)
+            finally:
+                gdf_mod.CDERI_CRT_MODULI = old
+            self._built = True
         return self.dfs.get_jk(dm, hermi=1, with_j=False, with_k=True, **self.kw)[1]
 
     def _unpack(self):
@@ -194,6 +209,10 @@ class SurrogateK:
         M = self.Cref.T @ (self.s1e @ C)
         U, _, Vt = cupy.linalg.svd(M)
         dC = C @ (Vt.T @ U.T) - self.Cref                                     # Procrustes-aligned increment
+        return self.k_inc_dC(dC)
+
+    def k_inc_dC(self, dC):
+        nao, nocc = dC.shape
         Ct = cupy.zeros((self.noccp, self.naop), dtype=np.float64)
         Ct[:nocc, :nao] = dC.T
         Y = self._mm(self.B2, Ct) * self.sB
@@ -202,6 +221,81 @@ class SurrogateK:
         P = self._mm(Ym, Z)
         P = P.astype(np.float64)
         return 2 * (P + P.T)
+
+
+def align_increment(Cref, C, s1e):
+    """dC = C R - Cref with the rotation R of the occupied space that brings C closest to Cref (Procrustes)."""
+    M = Cref.T @ (s1e @ C)
+    U, _, Vt = cupy.linalg.svd(M)
+    return C @ (Vt.T @ U.T) - Cref
+
+
+class CoarseXC:
+    """Semilocal XC on the inner (coarse) grid from cached FP32 AO values.
+    absolute(C): V_c(2CC^T) in FP32 (stage 1).   set_ref(C_ref) + inc(dC): V_c(D) - V_c(D_ref) with the
+    density increment rho = rho_ref + delta rho (delta psi = A^T dC in FP32, psi_ref in FP64), libxc in FP64 and
+    delta V = Phi^T diag(u - u_ref) Phi in FP32: the rounding error scales with the increment."""
+
+    def __init__(self, ni, mol, grid, xc):
+        self.ni, self.mol, self.grid, self.xc = ni, mol, grid, xc
+        self.xctype = ni._xc_type(xc)
+        assert self.xctype in ('GGA', 'MGGA')
+        self.opt = opt = ni.gdftopt
+        self.nao = mol.nao
+        self.blocks = []
+        p0 = 0
+        for ao, idx, weight, _ in ni.block_loop(opt._sorted_mol, grid, self.nao, 1, max_memory=None):
+            self.blocks.append((ao[:4].astype(np.float32), idx, p0, weight.size))
+            p0 += weight.size
+        self.ng = p0
+        self.w = cupy.asarray(grid.weights)
+
+    def _sorted(self, C):
+        return self.opt.sort_orbitals(C, axis=[0]) * np.sqrt(2.0)
+
+    def _psi(self, Cs, dtype):
+        nocc = Cs.shape[1]
+        psi = cupy.empty((4, self.ng, nocc), dtype=dtype)
+        for A, idx, p0, ng in self.blocks:
+            Cb = cupy.ascontiguousarray(Cs[idx]).astype(dtype)
+            for k in range(4):
+                Ak = A[k] if dtype == np.float32 else A[k].astype(np.float64)
+                cupy.matmul(Ak.T, Cb, out=psi[k, p0:p0 + ng])
+        return psi
+
+    def _u(self, psi):
+        from gpu4pyscf.lib import crt_gemm
+        rho = crt_gemm.rho_from_cT(cupy.ascontiguousarray(psi, dtype=np.float64), self.ng, self.xctype)
+        exc, vxc = self.ni.eval_xc_eff(self.xc, rho, deriv=1, xctype=self.xctype, spin=0)[:2]
+        return cupy.asarray(vxc, order='C') * self.w
+
+    def _vmat(self, u):
+        from gpu4pyscf.dft.numint import add_sparse
+        V = cupy.zeros((self.nao, self.nao))
+        u32 = u.astype(np.float32)
+        mgga = self.xctype == 'MGGA'
+        for A, idx, p0, ng in self.blocks:
+            ub = u32[:, p0:p0 + ng]
+            B0 = 0.5 * ub[0] * A[0] + ub[1] * A[1] + ub[2] * A[2] + ub[3] * A[3]
+            H = A[0] @ B0.T
+            if mgga:
+                q = 0.25 * ub[4]
+                for x in range(1, 4):
+                    H += A[x] @ (q * A[x]).T
+            H = H.astype(np.float64)
+            add_sparse(V, H + H.T, idx)
+        return self.opt.unsort_orbitals(V, axis=[0, 1])
+
+    def absolute(self, C):
+        return self._vmat(self._u(self._psi(self._sorted(C), np.float32)))
+
+    def set_ref(self, Cref):
+        self.psi_ref = self._psi(self._sorted(Cref), np.float64)
+        self.u_ref = self._u(self.psi_ref)
+
+    def inc(self, dC):
+        psi = self.psi_ref + self._psi(self._sorted(dC), np.float32)
+        return self._vmat(self._u(psi) - self.u_ref)
 
 
 # ------------------------------------------------------------------ eigensolver
@@ -305,6 +399,7 @@ def kernel(mf, dm0=None, **kwargs):
         s1e = cupy.asarray(mf.get_ovlp())
         e_nuc = mf.energy_nuc()
         eig = FastEig(s1e, opt['eig'], nocc)
+        cx = CoarseXC(ni, mol, g_in, xc) if opt['coarse_xc'] == 'inc' else None
         sk = SurrogateK(mf, opt['surrogate_aux'], omega, alpha, hyb,
                         mode=opt['k_increment'] if opt['k_increment'] != 'exact' else 'fp32')
     conv_tol_grad = opt['conv_tol_grad'] or 0.1 * np.sqrt(mf.conv_tol)
@@ -364,7 +459,15 @@ def kernel(mf, dm0=None, **kwargs):
                     vk = sk.k_ref(dm)
                 else:
                     vk = sk.k_abs(C[:, :nocc])
-            f = h1e + vj + vxc_coarse(dm, nlc=with_nlc) - 0.5 * vk
+            if it == 0 or cx is None:
+                vc1 = vxc_coarse(dm, nlc=with_nlc)
+            else:
+                with tim('xc_coarse32'):
+                    vc1 = cx.absolute(C[:, :nocc])
+                if with_nlc:
+                    with tim('nlc_coarse'):
+                        vc1 = vc1 + ni.nr_nlc_vxc(mol, g_nlc1, nlc_xc, dm)[2]
+            f = h1e + vj + vc1 - 0.5 * vk
             if it > 0:
                 g = orb_grad(f, C)
                 if g < opt['stage1_conv_grad']:
@@ -388,7 +491,7 @@ def kernel(mf, dm0=None, **kwargs):
             want_grad = (opt['fuse_grad'] and opt['fine_vco'] and xctype in ('GGA', 'MGGA')
                          and last_inner_tol is not None and last_inner_tol < conv_tol_grad)
             # exact operator on the occupied space
-            with tim('xc_fine'):
+            with tim('xc_fine+grad' if want_grad else 'xc_fine'):
                 if opt['fine_vco']:
                     from gpu4pyscf.dft.numint import nr_rks_vco
                     res = nr_rks_vco(ni, mol, mf.grids, xc, C, occ, with_grad=want_grad)
@@ -433,6 +536,10 @@ def kernel(mf, dm0=None, **kwargs):
             if opt['k_increment'] != 'exact':
                 with tim('K_s set_ref'):
                     sk.set_ref(Co, s1e)
+            if cx is not None:
+                with tim('xc_coarse set_ref'):
+                    cx.set_ref(Co)
+            Co_ref = Co
             f = hc + vc - 0.5 * vks_ref + Delta
             Dref_tag = dm
             diis = new_diis()
@@ -444,12 +551,18 @@ def kernel(mf, dm0=None, **kwargs):
                 e, C, occ = solve(fd)
                 dm = tagged(C, occ)
                 ncyc['inner'] += 1
+                dC = align_increment(Co_ref, C[:, :nocc], s1e)
                 with tim('K_s inc'):
                     if opt['k_increment'] == 'exact':
                         vks = sk.k_ref(dm)
                     else:
-                        vks = vks_ref + sk.k_inc(C[:, :nocc])
-                f = h1e + get_j(dm) + vxc_coarse(dm) - 0.5 * vks + Delta
+                        vks = vks_ref + sk.k_inc_dC(dC)
+                if cx is not None:
+                    with tim('xc_coarse inc'):
+                        vci = vc + cx.inc(dC)
+                else:
+                    vci = vxc_coarse(dm)
+                f = h1e + get_j(dm) + vci - 0.5 * vks + Delta
                 gs = orb_grad(f, C)
                 if gs < inner_tol:
                     break

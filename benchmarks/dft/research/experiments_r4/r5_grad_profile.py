@@ -40,7 +40,7 @@ w = gto.M(atom='O 0 0 0; H 0 .76 .59; H 0 -.76 .59', basis='def2-tzvp', verbose=
 wm = dft.RKS(w, xc='wb97m-v').density_fit()
 wm.grids.atom_grid = (20, 50); wm.nlcgrids.atom_grid = (10, 26)
 wm.mixed_precision = {'scheme': 'crt'}
-wm.multifidelity = dict(opts)
+wm.multifidelity = dict(opts) or True
 wm.kernel()
 wm.nuc_grad_method().kernel()
 T.clear()
@@ -50,7 +50,7 @@ mf.grids.atom_grid = (99, 590)
 mf.nlcgrids.atom_grid = (50, 194)
 mf.conv_tol = 1e-9
 mf.mixed_precision = {'scheme': 'crt'}
-mf.multifidelity = dict(opts)
+mf.multifidelity = dict(opts) or True
 cupy.cuda.Stream.null.synchronize()
 t0 = time.perf_counter()
 e = mf.kernel()
@@ -63,7 +63,9 @@ for k, (s_, n_) in sorted(st['timers'].items(), key=lambda kv: -kv[1][0]):
     print(f'   {k:16s} {s_:7.2f} s {n_:4d} {s_ / max(n_, 1):7.3f}', flush=True)
 T.clear()
 t0 = time.perf_counter()
-g = mf.nuc_grad_method().kernel()
+gobj = mf.nuc_grad_method()
+gobj.verbose = 6
+g = gobj.kernel()
 cupy.cuda.Stream.null.synchronize()
 t_g = time.perf_counter() - t0
 dg = float(abs(np.asarray(g) - np.asarray(ref['grad'])).max())

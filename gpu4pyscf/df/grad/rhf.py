@@ -14,6 +14,7 @@
 
 import ctypes
 import numpy as np
+from gpu4pyscf.lib import crt_gemm
 import cupy as cp
 from cupyx.scipy.linalg import solve_triangular
 from pyscf import lib
@@ -57,6 +58,32 @@ def _gen_metric_solver(int2c, decompose_j2c='CD', lindep=df.LINEAR_DEP_THR):
         x = v1 @ x
         return x.reshape(b.shape)
     return j2c_solver
+
+# Number of INT8 moduli for the two large contractions of the DF J/K gradient (0: FP64).  Set by
+# gpu4pyscf.scf.mixed_precision.grad_stage for the 'crt' scheme.
+JK_GRAD_CRT_MODULI = 0
+JK_GRAD_CRT_BUDGET = 6e8     # bytes of INT8-CRT temporaries per sub-block
+
+def _crt_contract_r(a, src3, out3, alpha=1.0, beta=0.0):
+    '''out3[m, q, r] = alpha * sum_k a[m, k] src3[k, q, r] + beta * out3[m, q, r] with INT8-CRT GEMMs, in chunks
+    of the last (aux) index so that the residue planes and int32 products stay under JK_GRAD_CRT_BUDGET.'''
+    nmod = JK_GRAD_CRT_MODULI
+    K, nq, nr = src3.shape
+    m = a.shape[0]
+    per_r = nq * (K * (nmod + 8) + m * (4 * nmod + 16))
+    sb = max(1, int(JK_GRAD_CRT_BUDGET // per_r))
+    for r0 in range(0, nr, sb):
+        r1 = min(nr, r0 + sb)
+        b = cp.ascontiguousarray(src3[:, :, r0:r1]).reshape(K, nq * (r1 - r0))
+        g = crt_gemm.gemm_dense(a, b, nmod, budget=JK_GRAD_CRT_BUDGET / 2).reshape(m, nq, r1 - r0)
+        b = None
+        if beta:
+            out3[:, :, r0:r1] *= beta
+            out3[:, :, r0:r1] += alpha * g
+        elif alpha == 1.0:
+            out3[:, :, r0:r1] = g
+        else:
+            out3[:, :, r0:r1] = alpha * g
 
 def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                         auxbasis_response=True, verbose=None,
@@ -120,7 +147,11 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
             j3c = j3c_full[:,:,:dk]
             j3c[j_addr,i_addr] = j3c[i_addr,j_addr] = compressed[:,k0:k1]
             tmp = ndarray((nocc, nao, dk), buffer=buf1)
-            contract('pqr,pi->iqr', j3c, dm_factor_r, out=tmp)
+            if JK_GRAD_CRT_MODULI:
+                # long reduction over the AO index: INT8-CRT emulated FP64 GEMM
+                _crt_contract_r(cp.ascontiguousarray(dm_factor_r.T), j3c, tmp)
+            else:
+                contract('pqr,pi->iqr', j3c, dm_factor_r, out=tmp)
             contract('iqr,qj->rij', tmp, dm_factor_l, out=j3c_oo[aux0:aux1])
     j3c_full = buf = buf1 = eval_j3c = j3c = tmp = compressed = None
     t0 = log.timer_debug1('contract dm', *t0)
@@ -192,7 +223,11 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                 cp.multiply(dm[:,:,None], auxvec[aux0:aux1], out=dm_tensor)
                 beta = j_factor
             contract('rji,qj->iqr', dm_oo[aux0:aux1], dm_factor_l, out=tmp)
-            contract('iqr,pi->pqr', tmp, dm_factor_r, -.5*k_factor, beta, out=dm_tensor)
+            if JK_GRAD_CRT_MODULI:
+                _crt_contract_r(cp.ascontiguousarray(dm_factor_r), tmp, dm_tensor,
+                                alpha=-.5 * k_factor, beta=beta)
+            else:
+                contract('iqr,pi->pqr', tmp, dm_factor_r, -.5*k_factor, beta, out=dm_tensor)
             if hermi == 1:
                 cp.take(dm_tensor.reshape(-1,dk), pair_addresses, axis=0,
                         out=compressed[:,k0:k1])

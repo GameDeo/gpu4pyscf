@@ -61,11 +61,23 @@ def energy_ee(ks_grad, mol=None, dm=None, verbose=None):
     t0 = log.timer('vxc total', *t0)
 
     if mf.do_nlc():
-        enlc1_per_atom, enlc1_grid = rks_grad._get_denlc(ks_grad, mol, dm)
+        with mixed_precision.grad_stage(mf):
+            enlc1_per_atom, enlc1_grid = rks_grad._get_denlc(ks_grad, mol, dm)
         exc1 += enlc1_per_atom * 2
         if ks_grad.grid_response:
             exc1 += enlc1_grid
 
+    jk_ctx = mixed_precision.grad_stage(mf)
+    jk_ctx.__enter__()
+    try:
+        exc1 += _jk_part(ks_grad, mf, ni, dm, omega, alpha, hyb, log)
+    finally:
+        jk_ctx.__exit__(None, None, None)
+    return exc1
+
+
+def _jk_part(ks_grad, mf, ni, dm, omega, alpha, hyb, log):
+    exc1 = 0
     if ni.libxc.is_hybrid_xc(mf.xc) and omega != 0:  # For range separated Coulomb operator
         range_separated_mode = getattr(mf, 'range_separated_mode', 'mix_outside_kernel')
         if range_separated_mode == 'mix_outside_kernel':
