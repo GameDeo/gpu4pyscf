@@ -11,7 +11,11 @@ Date 2026-11-05.
 1. **Taxol on one T4, SCF + gradient (section 1).**
    - The SCF converges in 3 exact checkpoints (22 min) with 5 GB peak GPU pool.
    - The round-7 gradient attempt was killed by the host OOM killer: cupy's pinned pool kept the 39 GB of surrogate
-     tensors after the SCF. Fixed. TAXOL8_SUMMARY
+     tensors after the SCF. Fixed: gpu4pyscf installs its own pinned pool, which is now released. A second failure
+     followed: a GPU OOM in the FP32-tier split. Also fixed.
+   - **Final run (`r8_taxol3.log`):** SCF 1271 s + gradient 194 s = **24.4 min on one T4**. Host memory is 6.8 GB at
+     the start of the gradient (was 46 GB); peak GPU pool 4.9 GB.
+   - The one-pass streamed J cut J from 4.0 to 1.7 s per call (97 to 40 s per SCF).
 2. **Memory scaling can change asymptotically without losing contraction (section 2) [M, CPU emulation].**
    - Two surrogates need no stored 3-index tensor and converge at least as fast as the stored ones:
      - a grid-fitted J with the exact auxiliary basis;
@@ -58,7 +62,14 @@ SCF (`r7_taxol.log`, `inc_store='f32'`, `exact_k='direct'`): E = -2929.672460133
 - **Exact checkpoints:** the other half. Each is two streamed integral passes per operator (FR, LR), with the
   INT8-CRT half transforms dominant (report 7 section 3).
 
-TAXOL8_GRAD
+**Gradient and the rerun with this round's fixes (`r8_taxol3.log`):**
+- **SCF:** E = -2929.6724601309 in 1271.1 s; 3 checkpoints, |g| 3.8e-2, 4.1e-4, 1.6e-5.
+- **J:** 40 s, down from 97 s (one streamed pass, double-buffered).
+- **Nuclear gradient:** 193.6 s, max|g| 0.110, |sum g| 1.8e-5 (translational-invariance residual, set by the DFT
+  grids). It reuses the last checkpoint's host-resident fit and uses the 10 % FP32 tier.
+- **Energy agreement:** across the three runs (1319.6 / 1250.4 / 1271.1 s) the SCF energies agree to 3e-10 Eh.
+- **No reference:** there is no FP64 reference for Taxol (stock gpu4pyscf cannot run it on this machine), so the
+  gradient's accuracy is inferred from BPA.
 
 ## 2. Memory scaling: surrogates without stored tensors [M, CPU emulation]
 

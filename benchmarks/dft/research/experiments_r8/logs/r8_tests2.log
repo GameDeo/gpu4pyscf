@@ -1,0 +1,9 @@
+.............                                                            [100%]
+=============================== warnings summary ===============================
+gpu4pyscf/df/tests/test_df_rks_grad.py:119
+  /content/src/gpu4pyscf/gpu4pyscf/df/tests/test_df_rks_grad.py:119: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+13 passed, 1 warning in 124.95s (0:02:04)
+TESTSDONE
