@@ -84,7 +84,7 @@ and for the density D0:
 | SVP-RI K + **grid-fitted J** (jkfit aux, grid (50,194)) | naux + grid batch | J 3.2e-4 | 1.46e-2, 6.4e-5, 5.8e-7, 5.6e-9 | **227, 111, 103 (= exact J)** |
 | grid-fitted J with jfit aux | | J 4.4e-2 | | (= jfit DF) |
 | **seminumerical K (level-1 grid) + grid-fitted J** | grid batch | K 7.0e-4 | 1.46e-2, 1.65e-5, 1.65e-8, 4.4e-11 | **884, 996, 377** |
-| seminumerical K, level-0 grid + grid-fitted J | grid batch | K 2.6e-3 | SGX0_ROW |
+| seminumerical K, level-0 grid + grid-fitted J | grid batch | K 2.6e-3 | 1.46e-2, 1.9e-5, 3.8e-8, 1.3e-10 | 773, 496, 285 |
 | seminumerical K (level 1) + grid-fitted J, inner_factor 1e-4 | grid batch | K 7.0e-4 | SGX1B_ROW |
 
 The 884/996x rates are at the ~1000x ceiling set by the inner tolerance (1e-3 of the outer gradient); the

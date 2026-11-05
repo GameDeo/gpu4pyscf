@@ -2,3 +2,4 @@
 [    5.4 s] D0: surrogate SCF 8 cycles
 [    6.7 s]   grid-J def2-universal-jkfit (50, 194): 85528 points, naux 635, 1.1 s
 [    9.6 s]   K sgx level 0  ov rel err: dD 2.6e-03  D0 7.8e-04
+[  582.9 s] sgx0 K + grid J        outer |g|: 1.46e-02 1.88e-05 3.80e-08 1.33e-10  ratios: 773 496 285
