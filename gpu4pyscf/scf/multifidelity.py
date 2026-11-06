@@ -746,6 +746,12 @@ def kernel(mf, dm0=None, **kwargs):
     def proj_grad(X_, Co_):
         return _proj_grad(X_, Co_, Sinv, s1e)
 
+    def occ_grad(X_, Co_, C_):
+        '''|g| of an occupied-column operator X_ = F Co_ (projected form, or the virtual block of C_)'''
+        if Sinv is not None:
+            return proj_grad(X_, Co_)
+        return 2 * float(cupy.linalg.norm(C_[:, nocc:].T @ X_))
+
     def rotate(fd, C, e):
         return _rotate(fd, C, e, s1e, nocc, opt['rotate_steps'])
 
@@ -900,7 +906,7 @@ def kernel(mf, dm0=None, **kwargs):
                     if diag_prev.get('vnlc') is not None:
                         # VV10 is frozen inside Delta in the inner loop: its response over the last outer step
                         log.info('    diag: |g| of the VV10 change since the last checkpoint %.3e',
-                                 proj_grad((vnlc - diag_prev['vnlc']) @ Co, Co))
+                                 occ_grad((vnlc - diag_prev['vnlc']) @ Co, Co, C))
                     diag_prev['vnlc'] = vnlc
                     diag_prev['Wnlc'] = vnlc @ Co
                 vnlc = None
@@ -960,13 +966,13 @@ def kernel(mf, dm0=None, **kwargs):
             if len(hist) >= 2 and len(e_models) == len(hist) - 1:
                 log.info('    model energy error %.3e (0.12 g_prev g = %.1e)', e_models[-1] - e_tot,
                          0.12 * hist[-2][0] * gt)
-            if opt.get('diag') and outer == 0 and Sinv is not None:
+            if opt.get('diag') and outer == 0:
                 # model error at the stage-1 exit, term by term (exact minus stage-1 operator, projected gradient)
                 Wn = diag_prev.get('Wnlc', 0. * Co)
-                gJ = proj_grad((vj - get_j(dm)) @ Co, Co)
-                gK = proj_grad(-0.5 * (Wk - (sk.k_ref(dm) if not no_k else 0. * dm) @ Co), Co)
-                gX = proj_grad(Wxc - Wn - vxc_coarse(dm) @ Co, Co)
-                gN = proj_grad(Wn - (ni.nr_nlc_vxc(mol, g_nlc1, nlc_xc, dm)[2] @ Co if with_nlc else 0. * Co), Co)
+                gJ = occ_grad((vj - get_j(dm)) @ Co, Co, C)
+                gK = occ_grad(-0.5 * (Wk - (sk.k_ref(dm) if not no_k else 0. * dm) @ Co), Co, C)
+                gX = occ_grad(Wxc - Wn - vxc_coarse(dm) @ Co, Co, C)
+                gN = occ_grad(Wn - (ni.nr_nlc_vxc(mol, g_nlc1, nlc_xc, dm)[2] @ Co if with_nlc else 0. * Co), Co, C)
                 log.info('    diag: stage-1 model error |g| by term: J %.3e  K %.3e  XC %.3e  VV10 %.3e',
                          gJ, gK, gX, gN)
             if gt < conv_tol_grad and level == 'exact':
