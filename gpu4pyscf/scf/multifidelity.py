@@ -828,6 +828,23 @@ def kernel(mf, dm0=None, **kwargs):
         with tim('DF build'):
             if getattr(mf.with_df, '_cderi', None) is None and opt['exact_k'] != 'direct':
                 mf.with_df.build()                 # exact tensor first: J then takes the fast path
+            if opt.get('exact_store') == 'f32' and opt['exact_k'] != 'direct':
+                # compact FP32 storage of the metric-whitened exact tensors B = L^-1 (P|mn) (no J^-1 amplification
+                # of their rounding, unlike raw integrals); widened to FP64 block by block on use
+                def _f32(d):
+                    keys = list(d._cderi.keys()) if isinstance(d._cderi, dict) else range(len(d._cderi))
+                    for k_ in keys:
+                        v_ = d._cderi[k_]
+                        if isinstance(v_, cupy.ndarray) and v_.dtype == np.float64:
+                            d._cderi[k_] = v_.astype(np.float32)
+                        v_ = None
+                    cupy.get_default_memory_pool().free_all_blocks()
+                _f32(mf.with_df)
+                if omega != 0 and not no_k:
+                    with mf.with_df.range_coulomb(omega, None, None) as d_lr:
+                        if d_lr._cderi is None:
+                            d_lr.build(omega=omega)
+                        _f32(d_lr)
             if js is not None:
                 js.build(mem_frac=0.1)             # stored Coulomb tensor (INT16 increments / FP32)
             if sk8 is not None:

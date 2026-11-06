@@ -242,7 +242,17 @@ class DF(lib.StreamObject):
 
         pair_idx = cp.asarray(self._cderi_idx[0], dtype=np.int32)
         npairs = len(pair_idx)
-        if on_gpu:
+        if on_gpu and cderi_sparse.dtype == np.float32:
+            # compact FP32 storage of the (metric-whitened) tensor: blocks are widened to FP64 on use
+            for p0, p1 in lib.prange(0, naux_slice, blksize):
+                cderi_blk = cderi_sparse[p0:p1].astype(np.float64)
+                if not unpack:
+                    yield None, cderi_blk
+                else:
+                    out = fill_symmetric(cderi_blk.T, pair_idx, nao, 0, p1-p0,
+                                         out=work[:,:,:p1-p0])
+                    yield out.transpose(2,0,1), cderi_blk
+        elif on_gpu:
             for p0, p1 in lib.prange(0, naux_slice, blksize):
                 cderi_blk = cderi_sparse[p0:p1]
                 if not unpack:
