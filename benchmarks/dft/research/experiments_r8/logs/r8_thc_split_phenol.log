@@ -1,0 +1,8 @@
+[     7 s] nao 253 nocc 25
+[     8 s] candidate points 68496
+[    38 s] full-range   split THC rcut 0.7: 14 tight AOs, exact pairs 11 %, ng 506 (2x nao)  ov err 5.8e-01
+[   132 s] full-range   split THC rcut 0.7: 14 tight AOs, exact pairs 11 %, ng 1012 (4x nao)  ov err 5.2e-01
+[   311 s] full-range   split THC rcut 0.7: 14 tight AOs, exact pairs 11 %, ng 2024 (8x nao)  ov err 3.7e-01
+[   337 s] full-range   split THC rcut 1.5: 109 tight AOs, exact pairs 68 %, ng 506 (2x nao)  ov err 3.1e+00
+[   403 s] full-range   split THC rcut 1.5: 109 tight AOs, exact pairs 68 %, ng 1012 (4x nao)  ov err 1.6e+00
+[   532 s] full-range   split THC rcut 1.5: 109 tight AOs, exact pairs 68 %, ng 2024 (8x nao)  ov err 8.7e-01

@@ -1,0 +1,17 @@
+[     8 s] nao 253 nocc 25
+[     8 s] candidate points 68496
+[    10 s] LR erf(0.3)  SVP-RI DF K (baseline)          ov err 1.2e-07
+[    12 s] LR erf(0.3)  THC kmeans ng=  506 (2x nao)  ov err 7.2e-01   (2 s)
+[    21 s] LR erf(0.3)  THC qrcp   ng=  506 (2x nao)  ov err 8.4e-01   (9 s)
+[    23 s] LR erf(0.3)  THC kmeans ng= 1012 (4x nao)  ov err 6.6e-01   (2 s)
+[    48 s] LR erf(0.3)  THC qrcp   ng= 1012 (4x nao)  ov err 5.7e-01   (24 s)
+[    51 s] LR erf(0.3)  THC kmeans ng= 2024 (8x nao)  ov err 5.1e-01   (3 s)
+[   134 s] LR erf(0.3)  THC qrcp   ng= 2024 (8x nao)  ov err 3.0e-01   (83 s)
+[   136 s] full-range   SVP-RI DF K (baseline)          ov err 5.4e-03
+[   137 s] full-range   THC kmeans ng=  506 (2x nao)  ov err 5.6e-01   (2 s)
+[   144 s] full-range   THC qrcp   ng=  506 (2x nao)  ov err 6.2e-01   (7 s)
+[   147 s] full-range   THC kmeans ng= 1012 (4x nao)  ov err 5.0e-01   (3 s)
+[   170 s] full-range   THC qrcp   ng= 1012 (4x nao)  ov err 3.8e-01   (23 s)
+[   174 s] full-range   THC kmeans ng= 2024 (8x nao)  ov err 3.6e-01   (4 s)
+[   259 s] full-range   THC qrcp   ng= 2024 (8x nao)  ov err 1.8e-01   (85 s)
+[   259 s] done
