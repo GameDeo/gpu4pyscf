@@ -581,6 +581,49 @@ def _host_avail():
     return float('inf')
 
 
+def _plan_storage(mf, opt, omega, free, no_k):
+    '''Where the exact DF tensors go (sizes from the screened AO-pair count, the multi-fidelity tensors included).
+    Greedy in build order -- FR exact (DF build), surrogates, LR exact (first checkpoint) -- on a device budget that
+    keeps work space for XC / gradient, and a host budget below MemAvailable:
+      all on device (dense FP32 surrogate)  >  all on device (stored FP32 surrogates)  >  LR in host memory
+      >  FR + LR in host memory  >  'mixed' (FR stored, LR direct)  >  direct.'''
+    from pyscf.df import addons
+    df = mf.with_df
+    mol = mf.mol
+    nao = mol.nao
+    if getattr(df, 'intopt', None) is None:
+        df.build(build_cderi=False)            # pair screening only (no integrals)
+    npairs = len(df.intopt.pair_and_diag_indices()[0])
+    naux = df.auxmol.nao
+    nks = addons.make_auxmol(mol, opt['surrogate_aux']).nao_nr()
+    njs = addons.make_auxmol(mol, opt['surrogate_j_aux']).nao_nr()
+    E = 8. * naux * npairs                     # one exact FP64 tensor
+    nops = 2 if omega != 0 and not no_k else 1
+    dense = 0. if no_k else 4. * nks * nao * nao + 8. * nks * npairs   # SurrogateK: FP64 DF + unpacked FP32
+    f32 = 0. if no_k else 4. * npairs * (nks + njs)                     # stored FP32 K and J surrogates
+    dev = free - max(2.5e9, 0.2 * free)       # work space: XC blocks, CRT buffers, gradient
+    host = 0.8 * _host_avail() - 1.5e9         # the process itself, pinned staging, gradient
+    res = dict(mode='stored', f32=False, lr_host=False, lr_direct=False)
+    if nops * E + dense <= dev:
+        pass
+    elif nops * E + f32 <= dev:
+        res.update(f32=True)
+    elif nops == 2 and E + f32 <= dev and E <= host:
+        res.update(f32=True, lr_host=True)
+    elif f32 <= dev and nops * E <= host:
+        res.update(f32=True, lr_host=nops == 2)  # FR: the DF module places it (host when it does not fit)
+    elif nops == 2 and opt['occ_k'] and (E + f32 <= dev or (f32 <= dev and E <= host)):
+        res.update(f32=True, lr_direct=True)
+    else:
+        res.update(mode='direct')
+    res['msg'] = ('%s (npairs %d naux %d: exact %.2f GB x %d, surrogates dense %.2f / f32 %.2f GB; budget device '
+                  '%.1f GB host %.1f GB)%s%s' % (res['mode'] if not res['lr_direct'] else 'mixed FR-stored/LR-direct',
+                                               npairs, naux, E / 1e9, nops, dense / 1e9, f32 / 1e9, dev / 1e9,
+                                               host / 1e9, ' f32-surrogates' if res['f32'] else '',
+                                               ' LR-on-host' if res['lr_host'] else ''))
+    return res
+
+
 def kernel(mf, dm0=None, **kwargs):
     opt = dict(DEFAULTS)
     cfg = getattr(mf, 'multifidelity', None)
@@ -616,38 +659,32 @@ def kernel(mf, dm0=None, **kwargs):
         exact_on_host = False
         from gpu4pyscf.lib.cupy_helper import get_avail_mem as _gam
         free = _gam()                      # free device memory incl. the cached pool blocks
+        lr_direct = False                  # 'mixed': FR tensor stored, LR operator direct
         if opt['exact_k'] == 'auto':
-            # stored exact tensors: FP64 over ~half of the AO pairs, one per operator (FR, and LR when range separated)
-            from pyscf.df import addons as _addons
-            naux_x = _addons.make_auxmol(mol, mf.with_df.auxbasis).nao_nr() if mf.with_df.auxbasis else 3 * mol.nao
-            stored = 8 * naux_x * mol.nao * (mol.nao + 1) / 2 * (2 if omega != 0 else 1)
-            # stored tensors that do not fit on the device stay in host memory and are streamed (as stock gpu4pyscf
-            # does): ~1 s of PCIe per pass at 10 GB, against a full integral recomputation per checkpoint for 'direct'
-            # (12 s per checkpoint for Mg porphin on a T4).  Direct only when host memory cannot hold them either.
-            # (the DF module places each tensor on the device or in host memory by itself)
-            if stored <= 0.45 * free:
-                opt['exact_k'] = 'stored'
-            elif stored <= 0.45 * free + 0.5 * _host_avail():
-                opt['exact_k'] = 'stored'
-                exact_on_host = True       # (partly) host-resident: the surrogates go to compact FP32 storage
-            else:
-                opt['exact_k'] = 'direct'
-            log.info('multi-fidelity: exact tensors %.1f GB, device free %.1f GB, host available %.1f GB',
-                     stored / 1e9, free / 1e9, _host_avail() / 1e9)
-        if (opt['exact_k'] == 'direct' or exact_on_host) and opt['inc_store'] is None and not no_k:
+            plan = _plan_storage(mf, opt, omega, free, no_k)
+            opt['exact_k'], exact_on_host, lr_host, lr_direct = plan['mode'], plan['f32'], plan['lr_host'], \
+                plan['lr_direct']
+            log.info('multi-fidelity: storage plan %s', plan['msg'])
+            if lr_host:
+                # the LR tensor is built lazily at the first checkpoint, after the surrogates: keep it off the device
+                # so that the XC / gradient work space stays (the DF module would take whatever is left)
+                with mf.with_df.range_coulomb(omega, None, None) as d_lr:
+                    d_lr.use_gpu_memory = False
+        if (opt['exact_k'] == 'direct' or exact_on_host or lr_direct) and opt['inc_store'] is None and not no_k:
             # no exact DF tensor in memory: the inner-loop J must not fall back to mf.get_j (which streams the full
             # FP64 tensor from host memory every cycle): FP32 J and K surrogate tensors (pinned host memory when they
             # do not fit; the Taxol configuration), usable as absolute terms in stage 1 too
             opt['inc_store'] = 'f32'
         log.info('multi-fidelity: exact_k=%s inc_store=%s inc_filter=%g ref_k=%s',
                  opt['exact_k'], opt['inc_store'], opt['inc_filter'], opt['ref_k'])
-        if opt['exact_k'] == 'direct':
+        if opt['exact_k'] == 'direct' or lr_direct:
             from gpu4pyscf.df.direct_k import DirectDFK
             if getattr(mf.with_df, 'auxmol', None) is None:
                 mf.with_df.build(build_cderi=False) if 'build_cderi' in mf.with_df.build.__code__.co_varnames \
                     else mf.with_df.build()
             nm = opt['direct_nmod'] or (None, None)
-            dk_fr = DirectDFK(mol, mf.with_df.auxmol, None, nmod_t=nm[0], nmod_x=nm[1])
+            if not lr_direct:
+                dk_fr = DirectDFK(mol, mf.with_df.auxmol, None, nmod_t=nm[0], nmod_x=nm[1])
             if omega != 0:
                 dk_lr = DirectDFK(mol, mf.with_df.auxmol, omega, nmod_t=nm[0], nmod_x=nm[1])
         g_cheap = g_nlc_cheap = None
@@ -811,6 +848,7 @@ def kernel(mf, dm0=None, **kwargs):
 
         # ---------------------------------------------------------------- outer/inner
         hist = []
+        diag_prev = {}
         e_tot = None
         mf._mf_xc_grad = None
         last_inner_tol = None
@@ -857,6 +895,13 @@ def kernel(mf, dm0=None, **kwargs):
                 with lvl_ctx, tim('nlc_fine' + ('' if level == 'exact' else '_' + level)):
                     _, enlc, vnlc = ni.nr_nlc_vxc(mol, grids_nlc, nlc_xc, dm)
                 Wxc = Wxc + vnlc @ Co
+                if opt.get('diag'):
+                    if diag_prev.get('vnlc') is not None:
+                        # VV10 is frozen inside Delta in the inner loop: its response over the last outer step
+                        log.info('    diag: |g| of the VV10 change since the last checkpoint %.3e',
+                                 proj_grad((vnlc - diag_prev['vnlc']) @ Co, Co))
+                    diag_prev['vnlc'] = vnlc
+                    diag_prev['Wnlc'] = vnlc @ Co
                 vnlc = None
             vj = None
             with lvl_ctx, tim('K exact' + ('' if level == 'exact' else '_' + level)):
@@ -880,7 +925,12 @@ def kernel(mf, dm0=None, **kwargs):
                     kc, t_fr = get_kc_occ(mf.with_df, Cw, keep_t=True)
                     Wk = hyb * kc
                     t_lr = None
-                    if omega != 0:
+                    if omega != 0 and dk_lr is not None:
+                        # 'mixed' storage: the LR operator does not fit, two direct passes (J from the stored FR)
+                        cupy.get_default_memory_pool().free_all_blocks()
+                        kf = last_inner_tol is not None and last_inner_tol < conv_tol_grad
+                        Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False, keep_fit=kf)[0]
+                    elif omega != 0:
                         with mf.with_df.range_coulomb(omega, None, None) as d_lr:
                             kc, t_lr = get_kc_occ(d_lr, Cw, keep_t=True, omega=omega)
                         Wk += (alpha - hyb) * kc
@@ -906,6 +956,15 @@ def kernel(mf, dm0=None, **kwargs):
             gt = proj_grad(Wt, Co) if Sinv is not None else 2 * float(cupy.linalg.norm(C[:, nocc:].T @ Wt))
             hist.append((gt, e_tot))
             log.info('multi-fidelity: outer %d (%s)  E = %.12f  |g| = %.3e', outer, level, e_tot, gt)
+            if opt.get('diag') and outer == 0 and Sinv is not None:
+                # model error at the stage-1 exit, term by term (exact minus stage-1 operator, projected gradient)
+                Wn = diag_prev.get('Wnlc', 0. * Co)
+                gJ = proj_grad((vj - get_j(dm)) @ Co, Co)
+                gK = proj_grad(-0.5 * (Wk - (sk.k_ref(dm) if not no_k else 0. * dm) @ Co), Co)
+                gX = proj_grad(Wxc - Wn - vxc_coarse(dm) @ Co, Co)
+                gN = proj_grad(Wn - (ni.nr_nlc_vxc(mol, g_nlc1, nlc_xc, dm)[2] @ Co if with_nlc else 0. * Co), Co)
+                log.info('    diag: stage-1 model error |g| by term: J %.3e  K %.3e  XC %.3e  VV10 %.3e',
+                         gJ, gK, gX, gN)
             if gt < conv_tol_grad and level == 'exact':
                 break
             # cheap operator at D_ref and the occupied-projected defect
@@ -1023,7 +1082,12 @@ def kernel(mf, dm0=None, **kwargs):
                     R = ac.dot(T.reshape(T.shape[0], -1)).reshape(-1, nocc, nocc)
                     return cupy.einsum('ki,rkl,lj->rij', Uo, R, Uo)
                 cache = {'C': Cw, 'omega': abs(omega), 'fr': fit(mf.with_df, occ_t[0], None)}
-                if omega != 0:
+                if omega != 0 and dk_lr is not None:
+                    if dk_lr._fit is None:
+                        cache = None
+                    else:
+                        cache['lr'] = dk_lr.fit_oo(Uo)
+                elif omega != 0:
                     with mf.with_df.range_coulomb(omega, None, None) as d:
                         cache['lr'] = fit(d, occ_t[1], omega)
             else:

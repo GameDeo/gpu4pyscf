@@ -60,10 +60,17 @@ for xyz, xc, basis, variants in cases:
         mf = None; cupy.get_default_memory_pool().free_all_blocks()
     print('CASE %s  ref FP64 tight: SCF %.1f s GRAD %.1f s conv %s' % (tag, ts, tg, cv), flush=True)
     rec = dict(case=tag, ref=dict(e=e0, t_scf=ts, t_grad=tg), runs=[])
+    if os.environ.get('REF_ONLY'):
+        continue
     for v in [{}] + list(variants):
         mf = new_mf(mol, xc)
         mf.mixed_precision = {'scheme': 'crt'}
-        mf.multifidelity = dict(v) or True
+        vv = dict(v)
+        if os.environ.get('DIAG'):
+            vv['diag'] = True
+        mf.multifidelity = vv or True
+        if os.environ.get('VERB'):
+            mf.verbose = int(os.environ['VERB'])
         try:
             e, g, ts, tg, cv = run(mf)
         except Exception as ex:
@@ -72,6 +79,8 @@ for xyz, xc, basis, variants in cases:
             mf = None; cupy.get_default_memory_pool().free_all_blocks(); continue
         st = getattr(mf, 'multifidelity_stats', {}) or {}
         dg = float(abs(g - g0).max())
+        import resource
+        print('   peak host RSS %.2f GB' % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6), flush=True)
         print('RESULT %-48s %-28s dE %.1e  max|dg| %.1e  SCF %.2f GRAD %.2f total %.2f conv %s outer %s' % (
             tag, str(v), e - e0, dg, ts, tg, ts + tg, cv, len(st.get('outer_hist', []))), flush=True)
         rec['runs'].append(dict(v=str(v), dE=e - e0, dg=dg, t_scf=ts, t_grad=tg, conv=cv))
