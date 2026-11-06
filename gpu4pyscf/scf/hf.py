@@ -390,6 +390,21 @@ def energy_tot(mf, dm=None, h1e=None, vhf=None):
         e_tot = e_tot.get()
     return e_tot
 
+def _multifidelity_applies(mf):
+    '''The multi-fidelity SCF replaces the exact exchange in the inner loop: without exact exchange (pure functionals)
+    or outside closed-shell DF-RKS the regular SCF (with its mixed-precision stage, if enabled) is used.'''
+    ni = getattr(mf, '_numint', None)
+    xc = getattr(mf, 'xc', None)
+    if ni is None or xc is None or getattr(mf, 'with_df', None) is None or mf.mol.spin != 0:
+        logger.info(mf, 'multi-fidelity SCF not applicable (needs closed-shell DF-RKS): regular SCF')
+        return False
+    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(xc, spin=mf.mol.spin)
+    if abs(hyb) < 1e-14 and abs(alpha) < 1e-14:
+        logger.info(mf, 'multi-fidelity SCF: no exact exchange in %s, regular SCF', xc)
+        return False
+    return True
+
+
 def scf(mf, dm0=None, **kwargs):
     cput0 = logger.init_timer(mf)
 
@@ -400,7 +415,7 @@ def scf(mf, dm0=None, **kwargs):
         # Initial guess from existing wavefunction
         dm0 = mf.make_rdm1()
 
-    if getattr(mf, 'multifidelity', False) and mf.max_cycle > 0:
+    if getattr(mf, 'multifidelity', False) and mf.max_cycle > 0 and _multifidelity_applies(mf):
         # defect-corrected multi-fidelity SCF (closed-shell DF-RKS); see scf/multifidelity.py
         from gpu4pyscf.scf import multifidelity
         multifidelity.kernel(mf, dm0, **kwargs)

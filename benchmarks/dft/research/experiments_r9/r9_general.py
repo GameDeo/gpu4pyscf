@@ -1,0 +1,78 @@
+'''Round 9: generalization matrix on one GPU.
+Each case: stock FP64 DF at tight convergence (conv_tol 1e-11, conv_tol_grad 1e-7) as the reference, then the
+multi-fidelity + mixed-precision defaults (and optional variants). Prints energy/gradient error and times.
+usage: python r9_general.py "[(xyz, xc, basis, [variant dicts]), ...]"'''
+import os, sys, time, json
+import numpy as np
+import cupy
+from pyscf import gto
+from gpu4pyscf import dft
+
+here = os.path.dirname(os.path.abspath(__file__))
+mdir = os.path.join(here, '..', '..', '..', 'molecules', 'organic')
+cases = eval(sys.argv[1])
+
+
+def sync():
+    cupy.cuda.Stream.null.synchronize()
+
+
+def warm(xc):
+    w = gto.M(atom='O 0 0 0; H 0 .76 .59; H 0 -.76 .59', basis='def2-svp', verbose=0)
+    for mfl in (False, True):
+        wm = dft.RKS(w, xc=xc).density_fit()
+        wm.grids.atom_grid = (20, 50)
+        if mfl:
+            wm.mixed_precision = {'scheme': 'crt'}
+            wm.multifidelity = True
+        wm.kernel(); wm.nuc_grad_method().kernel()
+
+
+def new_mf(mol, xc):
+    mf = dft.RKS(mol, xc=xc).density_fit()
+    mf.grids.atom_grid = (99, 590)
+    if xc.lower().endswith('-v'):
+        mf.nlcgrids.atom_grid = (50, 194)
+    mf.conv_tol = 1e-9
+    return mf
+
+
+def run(mf):
+    sync(); t0 = time.perf_counter()
+    e = mf.kernel()
+    sync(); ts = time.perf_counter() - t0
+    g = np.asarray(mf.nuc_grad_method().kernel())
+    sync(); tg = time.perf_counter() - t0 - ts
+    return e, g, ts, tg, bool(mf.converged)
+
+
+out = []
+for xyz, xc, basis, variants in cases:
+    mol = gto.M(atom=os.path.join(mdir, xyz), basis=basis, verbose=0, max_memory=14000)
+    warm(xc)
+    tag = '%s %s/%s nao=%d' % (xyz.split('_', 1)[1][:-4], xc, basis, mol.nao)
+    mf = new_mf(mol, xc); mf.conv_tol = 1e-11; mf.conv_tol_grad = 1e-7
+    e0, g0, ts, tg, cv = run(mf)
+    print('CASE %s  ref FP64 tight: SCF %.1f s GRAD %.1f s conv %s' % (tag, ts, tg, cv), flush=True)
+    rec = dict(case=tag, ref=dict(e=e0, t_scf=ts, t_grad=tg), runs=[])
+    for v in [{}] + list(variants):
+        mf = new_mf(mol, xc)
+        mf.mixed_precision = {'scheme': 'crt'}
+        mf.multifidelity = dict(v) or True
+        try:
+            e, g, ts, tg, cv = run(mf)
+        except Exception as ex:
+            print('   FAIL %s %r' % (v, ex), flush=True); continue
+        st = getattr(mf, 'multifidelity_stats', {}) or {}
+        dg = float(abs(g - g0).max())
+        print('RESULT %-48s %-28s dE %.1e  max|dg| %.1e  SCF %.2f GRAD %.2f total %.2f conv %s outer %s' % (
+            tag, str(v), e - e0, dg, ts, tg, ts + tg, cv, len(st.get('outer_hist', []))), flush=True)
+        rec['runs'].append(dict(v=str(v), dE=e - e0, dg=dg, t_scf=ts, t_grad=tg, conv=cv))
+        if st:
+            print('   cycles', st.get('cycles'), 'outer |g|', ['%.1e' % g_ for g_, _ in st.get('outer_hist', [])], flush=True)
+            for k, (s_, n_) in sorted(st['timers'].items(), key=lambda kv: -kv[1][0])[:12]:
+                print(f'     {k:22s} {s_:7.2f} s {n_:4d}', flush=True)
+    out.append(rec)
+    json.dump(out, open('/content/res/r9_general.json', 'w'), indent=1)
+    mf = None; cupy.get_default_memory_pool().free_all_blocks()
+print('ALLDONE')

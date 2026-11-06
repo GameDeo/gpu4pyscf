@@ -44,25 +44,38 @@ def plan(K, nmod, qmax=QMAX):
 
 
 def _quant_src(n, wide):
+    """One thread per 4 consecutive columns of one row (kp is a multiple of 16): one char4 store per residue plane."""
     T = 'long long' if wide else 'int'
-    pre = 'int xh = (int)(x >> 36), xm = (int)((x >> 18) & 0x3FFFF), xl = (int)(x & 0x3FFFF);' if wide else ''
-    body = [_resid_code(i, p, wide, f'out[(size_t){i} * plane + idx]') for i, p in enumerate(ALL_MODULI[:n])]
-    return r'''
+    body = []
+    for i, p in enumerate(ALL_MODULI[:n]):
+        body.append('{ char4 o;')
+        for c in 'xyzw':
+            pre = (f'int xh = (int)(x{c} >> 36), xm = (int)((x{c} >> 18) & 0x3FFFF), xl = (int)(x{c} & 0x3FFFF); '
+                   if wide else f'{T} x = x{c}; ')
+            body.append('{ ' + pre + _resid_code(i, p, wide, f'o.{c}') + ' }')
+        body.append(f'reinterpret_cast<char4*>(out + (size_t){i} * plane)[gid] = o; }}')
+    return r"""
 extern "C" __global__ void quant(const double* __restrict__ a, const int* __restrict__ ex, signed char* __restrict__ out,
                                  int ncomp, int rows, int ng, int rp, int kp, int q, size_t plane,
                                  const int* __restrict__ cmap)
 {
     size_t gid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= (size_t)rp * kp) return;
-    int row = (int)(gid / kp), col = (int)(gid % kp);
-    size_t idx = gid;
-    ''' + T + r''' x = 0;
-    if (row < rows && col < ncomp * ng) {
-        int c = col / ng, g = col - c * ng;
-        double v = ldexp(a[((size_t)cmap[c] * rows + row) * ng + g], q - ex[row]);
-        x = (''' + T + r''')llrint(v);
+    int kq = kp >> 2;
+    if (gid >= (size_t)rp * kq) return;
+    int row = (int)(gid / kq), col0 = (int)(gid % kq) * 4;
+    """ + T + r""" xv[4] = {0, 0, 0, 0};
+    if (row < rows) {
+        int sh = q - ex[row];
+        for (int t = 0; t < 4; t++) {
+            int col = col0 + t;
+            if (col < ncomp * ng) {
+                int c = col / ng, g = col - c * ng;
+                xv[t] = (""" + T + r""")llrint(ldexp(a[((size_t)cmap[c] * rows + row) * ng + g], sh));
+            }
+        }
     }
-    ''' + pre + '\n    ' + '\n    '.join(body) + '\n}\n'
+    """ + T + r""" xx = xv[0], xy = xv[1], xz = xv[2], xw = xv[3];
+    """ + '\n    '.join(body) + '\n}\n'
 
 
 def _recon_src(n):
@@ -151,6 +164,9 @@ extern "C" __global__ void colmax(const double* __restrict__ a, unsigned long lo
 '''
 
 
+_mx2exp = cupy.ElementwiseKernel('float64 m', 'int32 e', 'int x = 0; if (m > 0.) frexp(m, &x); e = x;', 'crt_mx2exp')
+
+
 def _get(kind, n, wide=False):
     key = (kind, n, wide)
     k = _kern.get(key)
@@ -176,6 +192,7 @@ extern "C" __global__ void rowexp(const double* __restrict__ a, int* __restrict_
                                   const int* __restrict__ cmap)
 {
     int row = blockIdx.x;
+    if (row >= rows) { if (threadIdx.x == 0) e[row] = 0; return; }
     double m = 0.;
     for (int c = 0; c < ncomp; c++) {
         const double* p = a + ((size_t)cmap[c] * rows + row) * ng;
@@ -210,15 +227,17 @@ def _cmap(comps, ncomp):
     return m
 
 
-def _row_exponent(src, comps=None):
-    '''src [ncomp, rows, ng] -> int32 exponent e with max|src[comps, r, :]| < 2^e (comps: component subset).'''
+def _row_exponent(src, comps=None, padded=None):
+    '''src [ncomp, rows, ng] -> int32 exponent e with max|src[comps, r, :]| < 2^e (comps: component subset).
+    padded: length of the returned array (rows beyond `rows` get exponent 0).'''
     global _rowexp_kernel
     if _rowexp_kernel is None:
         _rowexp_kernel = cupy.RawKernel(_ROWEXP_SRC, 'rowexp')
     ncomp, rows, ng = src.shape
     nc = ncomp if comps is None else len(comps)
-    e = cupy.empty(rows, dtype=cupy.int32)
-    _rowexp_kernel((rows,), (256,), (src, e, np.int32(nc), np.int32(rows), np.int32(ng), _cmap(comps, ncomp)))
+    nr = rows if padded is None else padded
+    e = cupy.empty(nr, dtype=cupy.int32)
+    _rowexp_kernel((nr,), (256,), (src, e, np.int32(nc), np.int32(rows), np.int32(ng), _cmap(comps, ncomp)))
     return e
 
 
@@ -232,15 +251,19 @@ class Operand:
         ncomp = ncomp_src if comps is None else len(comps)
         self.rows, self.nmod, self.q = rows, nmod, q
         self.rp, self.kp = _pad16(rows), _pad16(ncomp * ng)
-        self.e = _row_exponent(src, comps) if e is None else e
-        ex = cupy.zeros(self.rp, dtype=cupy.int32)
-        ex[:rows] = self.e
+        if e is None:
+            ex = _row_exponent(src, comps, padded=self.rp)
+        else:
+            ex = cupy.zeros(self.rp, dtype=cupy.int32)
+            ex[:rows] = e
+        self.e = ex[:rows]
+        self.ep = ex                                         # zero-padded to rp
         self.planes = cupy.empty((nmod, self.rp, self.kp), dtype=cupy.int8)
-        tot = self.rp * self.kp
+        tot = self.rp * self.kp // 4
         thr = 256
         _get('q', nmod, q > 30)(((tot + thr - 1) // thr,), (thr,),
                                 (src, ex, self.planes, np.int32(ncomp), np.int32(rows), np.int32(ng),
-                                 np.int32(self.rp), np.int32(self.kp), np.int32(q), np.uint64(tot),
+                                 np.int32(self.rp), np.int32(self.kp), np.int32(q), np.uint64(self.rp * self.kp),
                                  _cmap(comps, ncomp_src)))
 
 
@@ -265,11 +288,10 @@ class PlanesT:
         thr = 128
         _get('cm', 0)(((d1 + thr - 1) // thr, d0), (thr,),
                       (src, mx, np.int32(d1), np.int32(d2), np.int64(s0), np.int64(s2), np.int32(sstride)))
-        amax = mx.view(cupy.float64)
-        _, e = cupy.frexp(amax)
-        ex = cupy.where(amax == 0, 0, e).astype(cupy.int32)
+        ex = _mx2exp(mx.view(cupy.float64))
         self.rows, self.rp, self.kp = d0 * P1, d0 * P1, P2
         self.e = ex if per_slab else cupy.tile(ex, d0)       # exponent of row (i, l)
+        self.ep = self.e                                   # rows == rp (padded rows have exponent 0)
         if compact:                                        # d0 == 1: no zero-padded rows in the result
             assert d0 == 1
             self.rows = d1
@@ -315,10 +337,7 @@ def matmul_operands(oa, ob, out, accumulate=False):
     n, q = oa.nmod, oa.q
     C = cupy.empty((n, oa.rp, ob.rp), dtype=cupy.int32)
     int8_mm_nt_batched(oa.planes, ob.planes, C)
-    ea = cupy.zeros(oa.rp, dtype=cupy.int32)
-    ea[:oa.rows] = oa.e[:oa.rows]
-    eb = cupy.zeros(ob.rp, dtype=cupy.int32)
-    eb[:ob.rows] = ob.e[:ob.rows]
+    ea, eb = oa.ep, ob.ep
     tot = oa.rows * ob.rows
     thr = 256
     _get('r', n)(((tot + thr - 1) // thr,), (thr,),

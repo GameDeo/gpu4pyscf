@@ -170,42 +170,69 @@ class SurrogateK:
         self.s1e = None
         self._built = False
 
+    def _build(self):
+        if self._built:
+            return
+        # the surrogate tensor is fixed for the whole SCF, so its build precision does not affect exactness
+        # (any fixed B gives a smooth linear operator): build it with fewer INT8 moduli than the exact tensor
+        from gpu4pyscf.df import df as gdf_mod
+        old = gdf_mod.CDERI_CRT_MODULI
+        gdf_mod.CDERI_CRT_MODULI = min(old, 8)
+        try:
+            with self.dfs.range_coulomb(self.kw['omega'], self.kw['lr_factor'], self.kw['sr_factor']) as d:
+                if d._cderi is None:
+                    d.build(**self.kw)
+        finally:
+            gdf_mod.CDERI_CRT_MODULI = old
+        self._built = True
+
     def k_ref(self, dm):
-        if not self._built:
-            # the surrogate tensor is fixed for the whole SCF, so its build precision does not affect exactness
-            # (any fixed B gives a smooth linear operator): build it with fewer INT8 moduli than the exact tensor
-            from gpu4pyscf.df import df as gdf_mod
-            old = gdf_mod.CDERI_CRT_MODULI
-            gdf_mod.CDERI_CRT_MODULI = min(old, 8)
-            try:
-                with self.dfs.range_coulomb(self.kw['omega'], self.kw['lr_factor'], self.kw['sr_factor']) as d:
-                    if d._cderi is None:
-                        d.build(**self.kw)
-            finally:
-                gdf_mod.CDERI_CRT_MODULI = old
-            self._built = True
+        self._build()
         return self.dfs.get_jk(dm, hermi=1, with_j=False, with_k=True, **self.kw)[1]
 
+    def k_dm(self, dm, s1e):
+        '''K_s(dm) for a general symmetric density (e.g. the initial guess) through its natural orbitals:
+        dm = N diag(n) N^T, K_s(dm) = k_abs(N sqrt(n / 2)) (natural occupations below 1e-10 are dropped, which only
+        perturbs the stage-1 start).'''
+        w, U = cupy.linalg.eigh(s1e)
+        X = U / cupy.sqrt(w)
+        SX = s1e @ X
+        n, V = cupy.linalg.eigh(SX.T @ dm @ SX)
+        keep = n > 1e-10
+        Cn = (X @ V[:, keep]) * cupy.sqrt(n[keep] / 2)
+        return self.k_abs(Cn)
+
     def _unpack(self):
+        '''Dense (naux, nao, naop) surrogate tensor, scattered straight from the compressed pair storage (one pass;
+        no FP64 (nao, nao, blk) unpack + strided transposed copy).'''
         nao = self.mol.nao
         self.naop = naop = _pad8(nao)
+        self._build()
         with self.dfs.range_coulomb(self.kw['omega'], self.kw['lr_factor'], self.kw['sr_factor']) as d:
-            if d._cderi is None:
-                d.build(**self.kw)
-            naux = d._cderi[0].shape[0]
+            cs = d._cderi[cupy.cuda.Device().id]
+            naux, npair = cs.shape
+            pair = cupy.asarray(d._cderi_idx[0], dtype=cupy.int64)
+            i_, j_ = pair // nao, pair % nao
+            idx_ij, idx_ji = i_ * naop + j_, j_ * naop + i_
             dt = np.float16 if self.mode == 'fp16' else np.float32
-            B = cupy.zeros((naux, nao, naop), dtype=dt)
-            amax = 0.0
-            for cderi, _ in d.loop(unpack=True):
-                amax = max(amax, float(abs(cderi).max()))
-            self.sB = amax if self.mode == 'fp16' else 1.0
-            p0 = 0
-            for cderi, _ in d.loop(unpack=True):
-                n = len(cderi)
-                B[p0:p0 + n, :, :nao] = (cderi * (1.0 / self.sB)).astype(dt)
-                p0 += n
+            blk = max(1, min(naux, int(2e8 // (12 * max(npair, 1)))))
+            if self.mode == 'fp16':
+                amax = 0.0
+                for p0 in range(0, naux, blk):
+                    amax = max(amax, float(abs(cupy.asarray(cs[p0:p0 + blk])).max()))
+                self.sB = amax
+            else:
+                self.sB = 1.0
+            B = cupy.zeros((naux, nao * naop), dtype=dt)
+            for p0 in range(0, naux, blk):
+                p1 = min(naux, p0 + blk)
+                v = cupy.asarray(cs[p0:p1])
+                v = (v * (1.0 / self.sB)).astype(dt) if self.sB != 1.0 else v.astype(dt)
+                B[p0:p1, idx_ji] = v
+                B[p0:p1, idx_ij] = v
+                v = None
         self.naux = naux
-        self.B = B
+        self.B = B.reshape(naux, nao, naop)
         self.B2 = B.reshape(naux * nao, naop)
 
     def _mm(self, a, b):
@@ -692,7 +719,9 @@ def kernel(mf, dm0=None, **kwargs):
         for it in range(opt['max_stage1']):
             vj = get_j(dm)
             with tim('K_s stage1'):
-                if it == 0 or opt['k_increment'] == 'exact':
+                if it == 0 and opt['k_increment'] != 'exact' and isinstance(sk, SurrogateK):
+                    vk = sk.k_dm(dm, s1e)          # natural orbitals of the guess: no separate DF-K pass
+                elif it == 0 or opt['k_increment'] == 'exact':
                     vk = sk.k_ref(dm)
                 else:
                     vk = sk.k_abs(C[:, :nocc])
