@@ -1,0 +1,6 @@
+nao 2228 nocc 226 naux 5598
+nmod (None, None): total 246.6 s  rel err vs default 0.0e+00   half pass2 88.9  half pass1 88.1  int3c2e 13.4  T = X C 8.9  KC += X Z 8.6  unpack 6.6
+nmod (15, 11): total 134.7 s  rel err vs default 9.4e-12   half pass1 34.3  half pass2 25.3  int3c2e 13.8  T = X C 12.0  KC += X Z 11.4  unpack 5.7
+nmod (8, 6): total 112.8 s  rel err vs default 2.0e-05   half pass1 22.6  half pass2 17.6  int3c2e 13.7  T = X C 10.7  KC += X Z 10.3  unpack 5.7
+nmod (5, 4): total 104.8 s  rel err vs default 1.7e+01   half pass1 18.0  half pass2 15.0  int3c2e 13.6  T = X C 10.4  KC += X Z 9.9  unpack 5.7
+RUNDONE

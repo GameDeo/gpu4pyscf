@@ -1,0 +1,17 @@
+surrogate DF build (SVP-RI, RSH)         0.878 s
+k_ref (DF-K, CRT)                        0.339 s
+ensure (unpack FP32 B)                   1.316 s
+B shape (1040, 623, 624)
+k_abs (FP32)                             0.038 s
+k_dm (natural orbitals of the guess)     0.625 s
+k_dm vs k_ref rel err 6.2e-06
+surrogate DF build (SVP-RI, RSH)         0.691 s
+k_ref (DF-K, CRT)                        0.262 s
+ensure (unpack FP32 B)                   0.484 s
+B shape (1040, 623, 624)
+k_abs (FP32)                             0.039 s
+k_dm (natural orbitals of the guess)     0.112 s
+k_dm vs k_ref rel err 6.2e-06
+exact DF build (jkfit, FR)               1.219 s
+naux surrogate None nao 623
+RUNDONE

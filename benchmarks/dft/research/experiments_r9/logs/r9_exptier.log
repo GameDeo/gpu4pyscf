@@ -1,0 +1,33 @@
+RESULT mf default dE 1.53e-10  SCF 14.82 s  GRAD 4.65 s  total 19.47 s  max|dg| 4.9e-07
+   cycles {'stage1': 8, 'inner': 7, 'outer': 2} outer |g| ['7.7e-03', '1.9e-05']
+     xc_fine+grad              2.83 s    1   2.829
+     K exact                   2.22 s    2   1.110
+     K_s stage1                1.56 s    9   0.174
+     xc_fine                   1.21 s    1   1.206
+     DF build                  1.14 s    1   1.139
+     nlc_fine                  1.02 s    2   0.511
+     eig                       0.67 s   15   0.045
+     xc_coarse32               0.61 s    8   0.076
+     setup                     0.57 s    1   0.569
+     J                         0.52 s   16   0.032
+     xc_coarse inc             0.48 s    7   0.069
+     xc_coarse                 0.36 s    2   0.181
+     K_s inc                   0.28 s    7   0.041
+     diis                      0.26 s   15   0.017
+     nlc_coarse                0.22 s    9   0.025
+     K_s exact                 0.21 s    1   0.213
+     grad fit_oo               0.16 s    1   0.162
+     xc_coarse set_ref         0.13 s    1   0.133
+     J exact                   0.08 s    2   0.039
+     init_guess                0.07 s    1   0.070
+     K_s set_ref               0.02 s    1   0.021
+FP64 tier only: grad 6.37 s  DF_JK 4.88 s  max|dg| vs ref 4.8e-07
+TIERS {'frac': 1.0}                            grad 3.71 s  DF_JK 2.35 s (fp64 4.88)  extra max|dg| 6.0e-06  vs ref 5.6e-06
+TIERS {'exp_thr': 3.0}                         grad 5.45 s  DF_JK 4.03 s (fp64 4.88)  extra max|dg| 1.7e-06  vs ref 1.7e-06
+TIERS {'exp_thr': 10.0}                        grad 5.15 s  DF_JK 3.77 s (fp64 4.88)  extra max|dg| 1.7e-06  vs ref 1.8e-06
+TIERS {'exp_thr': 30.0}                        grad 5.15 s  DF_JK 3.77 s (fp64 4.88)  extra max|dg| 1.7e-06  vs ref 1.9e-06
+TIERS {'exp_thr': 100.0}                       grad 4.25 s  DF_JK 2.74 s (fp64 4.88)  extra max|dg| 4.8e-06  vs ref 4.4e-06
+TIERS {'exp_thr': 1000.0}                      grad 4.11 s  DF_JK 2.73 s (fp64 4.88)  extra max|dg| 4.8e-06  vs ref 4.4e-06
+TIERS {'frac': 0.3, 'exp_thr': 30.0, 'exp_or': False} grad 5.28 s  DF_JK 3.89 s (fp64 4.88)  extra max|dg| 5.6e-07  vs ref 6.4e-07
+done
+RUNDONE

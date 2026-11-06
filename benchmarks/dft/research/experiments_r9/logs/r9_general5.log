@@ -1,0 +1,32 @@
+CASE Mg_Porphin wb97m-v/def2-tzvp nao=848  ref FP64 tight: SCF 0.0 s GRAD 0.0 s conv True
+RESULT Mg_Porphin wb97m-v/def2-tzvp nao=848             {}                           dE -7.3e-10  max|dg| 3.0e-07  SCF 54.90 GRAD 12.40 total 67.29 conv True outer 3
+   cycles {'stage1': 8, 'inner': 15, 'outer': 3} outer |g| ['2.5e-02', '9.3e-05', '1.0e-05']
+     K exact                  23.57 s    3
+     DF build                  4.38 s    1
+     K_s inc                   4.29 s   15
+     xc_fine+grad              4.02 s    1
+     xc_fine                   3.52 s    2
+     nlc_fine                  2.14 s    3
+     K_s stage1                2.09 s    9
+     xc_coarse inc             2.06 s   15
+     eig                       1.70 s   23
+     xc_coarse32               1.12 s    8
+     setup                     1.02 s    1
+     diis                      0.87 s   23
+CASE Penicillin_V b3lyp/def2-tzvp nao=858  ref FP64 tight: SCF 0.0 s GRAD 0.0 s conv True
+RESULT Penicillin_V b3lyp/def2-tzvp nao=858             {}                           dE -2.9e-10  max|dg| 3.8e-07  SCF 33.64 GRAD 4.85 total 38.49 conv True outer 3
+   cycles {'stage1': 11, 'inner': 14, 'outer': 3} outer |g| ['8.4e-02', '2.4e-04', '2.3e-06']
+     DF build                  6.83 s    1
+     xc_fine+grad              4.20 s    1
+     K_s inc                   4.09 s   14
+     xc_fine                   3.73 s    2
+     K exact                   3.61 s    3
+     K_s stage1                2.61 s   12
+     eig                       1.89 s   25
+     diis                      0.99 s   25
+     xc_coarse inc             0.97 s   14
+     xc_coarse32               0.74 s   11
+     setup                     0.66 s    1
+     xc_coarse set_ref         0.54 s    2
+ALLDONE
+CHAINDONE

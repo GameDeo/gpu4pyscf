@@ -1,0 +1,47 @@
+CASE Mg_Porphin wb97m-v/def2-tzvp nao=848  ref FP64 tight: SCF 517.9 s GRAD 39.2 s conv True
+RESULT Mg_Porphin wb97m-v/def2-tzvp nao=848             {}                           dE -6.8e-10  max|dg| 3.0e-07  SCF 70.54 GRAD 12.41 total 82.95 conv True outer 3
+   cycles {'stage1': 8, 'inner': 15, 'outer': 3} outer |g| ['2.5e-02', '9.3e-05', '1.0e-05']
+     K exact                  38.54 s    3
+     DF build                  4.66 s    1
+     K_s inc                   4.31 s   15
+     xc_fine+grad              4.08 s    1
+     xc_fine                   3.46 s    2
+     nlc_fine                  2.12 s    3
+     K_s stage1                2.07 s    9
+     xc_coarse inc             2.06 s   15
+     eig                       1.69 s   23
+     J                         1.10 s   24
+     xc_coarse32               1.05 s    8
+     setup                     1.03 s    1
+CASE Bisphenol_A wb97m-v/def2-tzvp nao=623  ref FP64 tight: SCF 272.1 s GRAD 18.7 s conv True
+RESULT Bisphenol_A wb97m-v/def2-tzvp nao=623            {}                           dE 1.2e-10  max|dg| 5.0e-07  SCF 15.42 GRAD 4.85 total 20.27 conv True outer 2
+   cycles {'stage1': 8, 'inner': 7, 'outer': 2} outer |g| ['7.7e-03', '1.9e-05']
+     xc_fine+grad              2.96 s    1
+     K exact                   2.23 s    2
+     K_s stage1                1.64 s    9
+     xc_fine                   1.31 s    1
+     DF build                  1.26 s    1
+     nlc_fine                  1.08 s    2
+     eig                       0.70 s   15
+     xc_coarse32               0.65 s    8
+     xc_coarse inc             0.59 s    7
+     J                         0.52 s   16
+     setup                     0.45 s    1
+     xc_coarse                 0.39 s    2
+CASE Penicillin_V b3lyp/def2-tzvp nao=858  ref FP64 tight: SCF 217.1 s GRAD 17.1 s conv True
+RESULT Penicillin_V b3lyp/def2-tzvp nao=858             {}                           dE -6.4e-11  max|dg| 3.8e-07  SCF 33.51 GRAD 4.83 total 38.34 conv True outer 3
+   cycles {'stage1': 11, 'inner': 14, 'outer': 3} outer |g| ['8.4e-02', '2.4e-04', '2.3e-06']
+     DF build                  6.90 s    1
+     xc_fine+grad              4.22 s    1
+     K_s inc                   4.04 s   14
+     xc_fine                   3.69 s    2
+     K exact                   3.55 s    3
+     K_s stage1                2.60 s   12
+     eig                       1.88 s   25
+     diis                      0.98 s   25
+     xc_coarse inc             0.95 s   14
+     xc_coarse32               0.70 s   11
+     setup                     0.68 s    1
+     xc_coarse set_ref         0.54 s    2
+ALLDONE
+CHAINDONE

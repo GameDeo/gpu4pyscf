@@ -1,0 +1,51 @@
+CASE Bisphenol_A b3lyp/def2-tzvp nao=623  ref FP64 tight: SCF 75.1 s GRAD 6.9 s conv True
+RESULT Bisphenol_A b3lyp/def2-tzvp nao=623              {}                           dE 5.4e-10  max|dg| 1.9e-07  SCF 17.01 GRAD 2.35 total 19.36 conv True outer 3
+CASE Bisphenol_A pbe0/def2-tzvp nao=623  ref FP64 tight: SCF 71.2 s GRAD 7.0 s conv True
+RESULT Bisphenol_A pbe0/def2-tzvp nao=623               {}                           dE 5.2e-10  max|dg| 1.3e-07  SCF 16.47 GRAD 2.16 total 18.64 conv True outer 3
+CASE Bisphenol_A wb97m-v/def2-svp nao=318  ref FP64 tight: SCF 150.9 s GRAD 11.1 s conv True
+RESULT Bisphenol_A wb97m-v/def2-svp nao=318             {}                           dE 1.9e-10  max|dg| 6.4e-07  SCF 7.59 GRAD 2.15 total 9.73 conv True outer 2
+Traceback (most recent call last):
+  File "/content/src/gpu4pyscf/gpu4pyscf/df/df.py", line 752, in _decompose_j2c
+    cd_low = cholesky(j2c)
+  File "/content/src/gpu4pyscf/gpu4pyscf/lib/cusolver.py", line 213, in cholesky
+    raise LinAlgError('failed to perform Cholesky Decomposition')
+gpu4pyscf.lib.cusolver.LinAlgError: failed to perform Cholesky Decomposition
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/content/src/gpu4pyscf/benchmarks/dft/research/experiments_r9/r9_general.py", line 52, in <module>
+    warm(xc)
+    ~~~~^^^^
+  File "/content/src/gpu4pyscf/benchmarks/dft/research/experiments_r9/r9_general.py", line 28, in warm
+    wm.kernel(); wm.nuc_grad_method().kernel()
+    ~~~~~~~~~^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/scf/hf.py", line 406, in scf
+    multifidelity.kernel(mf, dm0, **kwargs)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/scf/multifidelity.py", line 696, in kernel
+    vk = sk.k_ref(dm)
+  File "/content/src/gpu4pyscf/gpu4pyscf/scf/multifidelity.py", line 183, in k_ref
+    d.build(**self.kw)
+    ~~~~~~~^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/df/df.py", line 113, in build
+    self._cderi, self._cderi_idx = _cholesky_eri(
+                                   ~~~~~~~~~~~~~^
+        intopt, omega=omega, lr_factor=lr_factor, sr_factor=sr_factor,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        use_gpu_memory=self.use_gpu_memory)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/df/df.py", line 641, in _cholesky_eri
+    aux_coef, tag = _decompose_j2c(auxmol, aux_sorting, omega, lr_factor, sr_factor)
+                    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/df/df.py", line 763, in _decompose_j2c
+    aux_coef = auxmol.apply_C_dot(v, axis=0)
+  File "/content/src/gpu4pyscf/gpu4pyscf/gto/mole.py", line 949, in apply_C_dot
+    return out.reshape(out_shape)
+           ~~~~~~~~~~~^^^^^^^^^^^
+  File "cupy/_core/core.pyx", line 964, in cupy._core.core._ndarray_base.reshape
+  File "cupy/_core/_routines_manipulation.pyx", line 82, in cupy._core._routines_manipulation._ndarray_reshape
+  File "cupy/_core/_routines_manipulation.pyx", line 351, in cupy._core._routines_manipulation._reshape
+  File "cupy/_core/internal.pyx", line 196, in cupy._core.internal.infer_unknown_dimension
+ValueError: cannot reshape array of size 0 into shape (-1, 0)
+CHAINDONE

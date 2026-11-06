@@ -1,0 +1,17 @@
+gemm_nt  ncomp 1 m 1000 n 1000 ng 8000 nmod  7  old  3.890 ms  rel err 2.0e-06
+gemm_nt  ncomp 1 m 1000 n 1000 ng 8000 nmod  7  new  3.820 ms  rel err 2.0e-06
+gemm_planes d (60, 300, 1200) nmod  7  old  5.866 ms  rel err 6.4e-07
+gemm_planes d (60, 300, 1200) nmod  7  new  5.632 ms  rel err 6.4e-07
+gemm_nt  ncomp 4 m 1000 n 1000 ng 6000 nmod  7  old  14.640 ms  rel err 2.2e-06
+gemm_nt  ncomp 4 m 1000 n 1000 ng 6000 nmod  7  new  14.918 ms  rel err 2.2e-06
+gemm_planes d (60, 300, 1200) nmod  7  old  5.585 ms  rel err 7.0e-07
+gemm_planes d (60, 300, 1200) nmod  7  new  5.616 ms  rel err 7.0e-07
+gemm_nt  ncomp 1 m 1000 n 80 ng 20000 nmod  7  old  4.187 ms  rel err 4.2e-06
+gemm_nt  ncomp 1 m 1000 n 80 ng 20000 nmod  7  new  4.208 ms  rel err 4.2e-06
+gemm_planes d (60, 300, 1200) nmod  7  old  5.383 ms  rel err 6.5e-07
+gemm_planes d (60, 300, 1200) nmod  7  new  5.327 ms  rel err 6.5e-07
+gemm_nt  ncomp 1 m 1000 n 1000 ng 8000 nmod 12  old  6.849 ms  rel err 3.2e-12
+gemm_nt  ncomp 1 m 1000 n 1000 ng 8000 nmod 12  new  6.947 ms  rel err 3.2e-12
+gemm_planes d (60, 300, 1200) nmod 12  old  9.470 ms  rel err 1.3e-12
+gemm_planes d (60, 300, 1200) nmod 12  new  9.500 ms  rel err 1.3e-12
+RUNDONE

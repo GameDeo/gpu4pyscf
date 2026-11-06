@@ -1,0 +1,12 @@
+surrogate DF build (SVP-RI, RSH)         7.014 s
+k_ref (DF-K, CRT)                        0.568 s
+ensure (unpack FP32 B)                   0.988 s
+k_abs (FP32)                             0.145 s
+surrogate DF build (SVP-RI, RSH)         0.702 s
+k_ref (DF-K, CRT)                        0.263 s
+ensure (unpack FP32 B)                   0.722 s
+k_abs (FP32)                             0.037 s
+exact DF build (jkfit, FR)               1.565 s
+naux surrogate None nao 623
+RUNDONE
+BENCHDONE

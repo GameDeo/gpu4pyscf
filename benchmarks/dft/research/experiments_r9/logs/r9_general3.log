@@ -1,0 +1,89 @@
+CASE Bisphenol_A b3lyp/def2-tzvp nao=623  ref FP64 tight: SCF 75.4 s GRAD 7.0 s conv True
+RESULT Bisphenol_A b3lyp/def2-tzvp nao=623              {}                           dE 5.3e-10  max|dg| 2.0e-07  SCF 15.88 GRAD 1.97 total 17.86 conv True outer 3
+   cycles {'stage1': 8, 'inner': 14, 'outer': 3} outer |g| ['1.1e-02', '4.2e-05', '4.1e-07']
+     xc_fine+grad              5.66 s    2
+     K_s stage1                1.41 s    9
+     xc_fine                   1.19 s    1
+     DF build                  1.13 s    1
+     K exact                   1.04 s    3
+     eig                       0.98 s   22
+     J                         0.74 s   23
+     K_s inc                   0.55 s   14
+     xc_coarse inc             0.54 s   14
+     K_s exact                 0.40 s    2
+     setup                     0.39 s    1
+     diis                      0.36 s   22
+RESULT Bisphenol_A b3lyp/def2-tzvp nao=623              {'inner_factor': 0.0003}     dE 5.1e-10  max|dg| 2.0e-07  SCF 16.45 GRAD 2.07 total 18.53 conv True outer 3
+   cycles {'stage1': 8, 'inner': 15, 'outer': 3} outer |g| ['1.1e-02', '4.1e-05', '4.1e-07']
+     xc_fine+grad              5.62 s    2
+     K_s stage1                1.45 s    9
+     DF build                  1.44 s    1
+     xc_fine                   1.23 s    1
+     K exact                   1.05 s    3
+     eig                       1.03 s   23
+     J                         0.77 s   24
+     K_s inc                   0.61 s   15
+     xc_coarse inc             0.53 s   15
+     K_s exact                 0.40 s    2
+     setup                     0.39 s    1
+     diis                      0.39 s   23
+RESULT Bisphenol_A b3lyp/def2-tzvp nao=623              {'inner_factor': 0.0001}     dE 5.3e-10  max|dg| 1.9e-07  SCF 22.97 GRAD 2.15 total 25.11 conv True outer 3
+   cycles {'stage1': 8, 'inner': 49, 'outer': 3} outer |g| ['1.1e-02', '4.1e-05', '4.1e-07']
+     xc_fine+grad              5.70 s    2
+     eig                       2.58 s   57
+     K_s inc                   2.00 s   49
+     J                         1.87 s   58
+     xc_coarse inc             1.86 s   49
+     K_s stage1                1.48 s    9
+     DF build                  1.45 s    1
+     xc_fine                   1.22 s    1
+     K exact                   1.06 s    3
+     diis                      1.03 s   57
+     K_s exact                 0.40 s    2
+     setup                     0.40 s    1
+CASE Penicillin_V b3lyp/def2-tzvp nao=858  ref FP64 tight: SCF 210.1 s GRAD 16.8 s conv True
+RESULT Penicillin_V b3lyp/def2-tzvp nao=858             {}                           dE -1.7e-10  max|dg| 3.7e-07  SCF 45.20 GRAD 4.89 total 50.09 conv True outer 3
+   cycles {'stage1': 11, 'inner': 14, 'outer': 3} outer |g| ['8.4e-02', '2.4e-04', '2.3e-06']
+     K exact                  19.31 s    3
+     xc_fine+grad              3.93 s    1
+     DF build                  3.58 s    1
+     K_s inc                   3.50 s   14
+     xc_fine                   3.45 s    2
+     K_s stage1                2.41 s   12
+     eig                       1.84 s   25
+     setup                     1.17 s    1
+     J                         0.93 s   26
+     diis                      0.91 s   25
+     xc_coarse inc             0.86 s   14
+     xc_coarse32               0.67 s   11
+RESULT Penicillin_V b3lyp/def2-tzvp nao=858             {'inner_factor': 0.0001}     dE -1.4e-10  max|dg| 3.6e-07  SCF 48.64 GRAD 4.90 total 53.54 conv True outer 3
+   cycles {'stage1': 11, 'inner': 19, 'outer': 3} outer |g| ['8.4e-02', '2.3e-04', '2.2e-06']
+     K exact                  18.86 s    3
+     xc_fine+grad              7.88 s    2
+     K_s inc                   4.75 s   19
+     DF build                  3.88 s    1
+     K_s stage1                2.31 s   12
+     eig                       2.21 s   30
+     xc_fine                   1.80 s    1
+     xc_coarse inc             1.19 s   19
+     diis                      1.09 s   30
+     setup                     1.01 s    1
+     xc_coarse32               0.66 s   11
+     J                         0.57 s   31
+CASE Mg_Porphin wb97m-v/def2-tzvp nao=848  ref FP64 tight: SCF 505.8 s GRAD 38.2 s conv True
+RESULT Mg_Porphin wb97m-v/def2-tzvp nao=848             {}                           dE -5.7e-10  max|dg| 3.0e-07  SCF 68.46 GRAD 11.26 total 79.72 conv True outer 3
+   cycles {'stage1': 8, 'inner': 15, 'outer': 3} outer |g| ['2.5e-02', '9.3e-05', '1.0e-05']
+     K exact                  37.24 s    3
+     xc_fine+grad              7.66 s    2
+     DF build                  4.14 s    1
+     K_s inc                   3.63 s   15
+     nlc_fine                  1.99 s    3
+     xc_coarse inc             1.78 s   15
+     K_s stage1                1.75 s    9
+     xc_fine                   1.67 s    1
+     eig                       1.67 s   23
+     setup                     1.23 s    1
+     xc_coarse32               0.95 s    8
+     diis                      0.81 s   23
+ALLDONE
+CHAINDONE

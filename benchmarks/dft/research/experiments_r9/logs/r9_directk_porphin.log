@@ -1,0 +1,3 @@
+nao 848 nocc 86 naux 2136
+X_CACHE False nmod (15, 11): total 6.7 s  rel err (K C, J) vs uncached 0.0e+00   half pass1 1.8  half pass2 1.4  int3c2e 1.2  J 0.6  T = X C 0.5  metric 0.4  KC += X Z 0.3  unpack 0.3
+X_CACHE True nmod (15, 11): total 4.3 s  rel err (K C, J) vs uncached 9.6e-13   half pass1 1.7  int3c2e 0.6  int3c2e (J sweep) 0.6  metric 0.4  T = X C 0.3  KC += X Z 0.3  unpack 0.2  J 0.0
