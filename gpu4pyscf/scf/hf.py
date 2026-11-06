@@ -391,16 +391,12 @@ def energy_tot(mf, dm=None, h1e=None, vhf=None):
     return e_tot
 
 def _multifidelity_applies(mf):
-    '''The multi-fidelity SCF replaces the exact exchange in the inner loop: without exact exchange (pure functionals)
-    or outside closed-shell DF-RKS the regular SCF (with its mixed-precision stage, if enabled) is used.'''
+    '''The multi-fidelity SCF needs closed-shell DF-RKS; otherwise the regular SCF (with its mixed-precision stage, if
+    enabled) is used.  Pure functionals run it with zero exchange terms (staged XC grids and J only).'''
     ni = getattr(mf, '_numint', None)
     xc = getattr(mf, 'xc', None)
     if ni is None or xc is None or getattr(mf, 'with_df', None) is None or mf.mol.spin != 0:
         logger.info(mf, 'multi-fidelity SCF not applicable (needs closed-shell DF-RKS): regular SCF')
-        return False
-    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(xc, spin=mf.mol.spin)
-    if abs(hyb) < 1e-14 and abs(alpha) < 1e-14:
-        logger.info(mf, 'multi-fidelity SCF: no exact exchange in %s, regular SCF', xc)
         return False
     return True
 

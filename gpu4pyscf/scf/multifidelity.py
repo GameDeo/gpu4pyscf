@@ -290,6 +290,35 @@ class SurrogateK:
         return 2 * (P + P.T)
 
 
+class _NullK:
+    '''Surrogate for functionals without exact exchange: every K term is zero (the multi-fidelity SCF then stages
+    only the XC grids and J).'''
+
+    def __init__(self, nao):
+        self.nao = nao
+
+    def _z(self):
+        return cupy.zeros((self.nao, self.nao))
+
+    def k_dm(self, dm, s1e):
+        return self._z()
+
+    def k_ref(self, dm):
+        return self._z()
+
+    def k_abs(self, C):
+        return self._z()
+
+    def ensure(self):
+        pass
+
+    def set_ref(self, Cref, s1e):
+        pass
+
+    def k_inc_dC(self, dC):
+        return self._z()
+
+
 class SurrogateK8:
     """SurrogateK on an INT8-stored tensor (df.int8_df.Int8DF): same interface, memory ~ npairs * naux bytes."""
 
@@ -553,6 +582,9 @@ def kernel(mf, dm0=None, **kwargs):
     xc = mf.xc
     assert mol.spin == 0, 'multi-fidelity SCF: closed shell only'
     omega, alpha, hyb = ni.rsh_and_hybrid_coeff(xc, spin=mol.spin)
+    no_k = abs(hyb) < 1e-14 and abs(alpha) < 1e-14     # pure functional: no exchange operator at all
+    if no_k:
+        opt.update(inc_store=None, grad_fit_reuse=False, ref_k='none', exact_k='stored')
     nocc = mol.nelectron // 2
     with_nlc = mf.do_nlc()
     nlc_xc = xc if ni.libxc.is_nlc(xc) else mf.nlc
@@ -597,8 +629,8 @@ def kernel(mf, dm0=None, **kwargs):
         e_nuc = mf.energy_nuc()
         eig = FastEig(s1e, opt['eig'], nocc)
         cx = CoarseXC(ni, mol, g_in, xc, opt['coarse_cache_frac']) if opt['coarse_xc'] == 'inc' else None
-        sk = None
-        if (opt['ref_k'] != 'ace' or opt['inc_store'] in (None, 'j16') or opt['max_stage1'] > 0) \
+        sk = _NullK(mol.nao) if no_k else None
+        if not no_k and (opt['ref_k'] != 'ace' or opt['inc_store'] in (None, 'j16') or opt['max_stage1'] > 0) \
                 and opt['inc_store'] != 'f32':
             # dense FP32 surrogate (stage 1 and/or the K reference)
             sk = SurrogateK(mf, opt['surrogate_aux'], omega, alpha, hyb,
@@ -793,7 +825,9 @@ def kernel(mf, dm0=None, **kwargs):
                 vnlc = None
             vj = None
             with lvl_ctx, tim('K exact' + ('' if level == 'exact' else '_' + level)):
-                if opt['exact_k'] == 'direct':
+                if no_k:
+                    Wk = cupy.zeros_like(Co)
+                elif opt['exact_k'] == 'direct':
                     cupy.get_default_memory_pool().free_all_blocks()
                     Cw = Co * np.sqrt(2.0)
                     # keep J^-1 (P|ij) (naux * nocc^2 per operator) only where this is predicted to be the last
@@ -841,7 +875,9 @@ def kernel(mf, dm0=None, **kwargs):
                 break
             # cheap operator at D_ref and the occupied-projected defect
             with tim('K_s exact'):
-                if opt['ref_k'] == 'ace':
+                if no_k:
+                    vks_ref = cupy.zeros_like(dm)
+                elif opt['ref_k'] == 'ace':
                     # adaptively compressed exchange: rank-nocc, reproduces the exact K C_occ (K is positive definite
                     # on the occupied space for non-negative range-separation weights)
                     M = Co.T @ Wk

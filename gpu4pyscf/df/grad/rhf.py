@@ -362,6 +362,14 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
             group_bs.append(int(pair_batch_size) if np.ndim(pair_batch_size) == 0 else
                             int(pair_batch_size[mol.uniq_l_ctr[gi, 0], mol.uniq_l_ctr[gj, 0]]))
         envs32 = _envs_f32(int3c2e_opt.int3c2e_envs)
+        pair_maxexp = None
+        if 'exp_thr' in tiers:
+            # tightest primitive exponent of each shell pair (diagnostic tier: FP32 only for diffuse/valence pairs)
+            from pyscf.gto.mole import PTR_EXP, NPRIM_OF
+            b_ = mol._bas
+            mexp = np.array([mol._env[b_[i, PTR_EXP]:b_[i, PTR_EXP] + b_[i, NPRIM_OF]].max() for i in range(mol.nbas)])
+            ij_ = bas_ij_idx.get().astype(np.int64)
+            pair_maxexp = cp.asarray(np.maximum(mexp[ij_ // mol.nbas], mexp[ij_ % mol.nbas]))
         tier_stats = [0, 0]
         global TIER_GROUP_LABELS
         TIER_GROUP_LABELS = [(int(mol.uniq_l_ctr[gi, 0]), int(mol.uniq_l_ctr[gj, 0]))
@@ -415,7 +423,11 @@ def _jk_energy_per_atom(int3c2e_opt, dm, j_factor=1, k_factor=1, hermi=0,
                 for gidx in tiers['groups']:
                     low[group_sp[gidx][0]:group_sp[gidx][1]] = True
             else:
-                low = _tier_split(compressed, ao_pair_loc, group_sp, tiers['frac'])
+                low = _tier_split(compressed, ao_pair_loc, group_sp, tiers['frac']) if tiers.get('frac') else \
+                    cp.zeros(len(ao_pair_loc) - 1, dtype=bool)
+                if pair_maxexp is not None:
+                    low = (low | (pair_maxexp < tiers['exp_thr'])) if tiers.get('exp_or', True) else \
+                        (low & (pair_maxexp < tiers['exp_thr']))
             tab_hi = _tier_tables(~low, bas_ij_idx, ao_pair_loc, group_sp, group_bs)
             # 'skip': the low tier is dropped (Gamma-weighted screening) instead of evaluated in FP32
             tab_lo = None if tiers.get('skip') else _tier_tables(low, bas_ij_idx, ao_pair_loc, group_sp, group_bs)

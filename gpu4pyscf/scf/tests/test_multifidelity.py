@@ -76,6 +76,24 @@ class KnownValues(unittest.TestCase):
         g = mf.nuc_grad_method().kernel()
         self.assertAlmostEqual(float(abs(np.asarray(g) - np.asarray(g_ref)).max()), 0, 6)
 
+    def test_multifidelity_pure_functional(self):
+        # no exact exchange: zero K terms, staged XC grids and J only
+        ref = dft.RKS(mol, xc='pbe').density_fit()
+        ref.grids.atom_grid = (75, 302)
+        ref.conv_tol = 1e-11
+        ref.conv_tol_grad = 1e-7
+        e0 = ref.kernel()
+        mf = dft.RKS(mol, xc='pbe').density_fit()
+        mf.grids.atom_grid = (75, 302)
+        mf.conv_tol = 1e-10
+        mf.multifidelity = True
+        e = mf.kernel()
+        self.assertTrue(mf.converged)
+        self.assertAlmostEqual(e, e0, 8)
+        g = mf.nuc_grad_method().kernel()
+        g0 = ref.nuc_grad_method().kernel()
+        self.assertAlmostEqual(abs(np.asarray(g) - np.asarray(g0)).max(), 0, 5)
+
 
 if __name__ == '__main__':
     print('Full tests for the multi-fidelity SCF')
