@@ -51,8 +51,13 @@ for xyz, xc, basis, variants in cases:
     mol = gto.M(atom=os.path.join(mdir, xyz), basis=basis, verbose=0, max_memory=14000)
     warm(xc)
     tag = '%s %s/%s nao=%d' % (xyz.split('_', 1)[1][:-4], xc, basis, mol.nao)
-    mf = new_mf(mol, xc); mf.conv_tol = 1e-11; mf.conv_tol_grad = 1e-7
-    e0, g0, ts, tg, cv = run(mf)
+    if os.environ.get('SKIP_REF') and os.path.exists('/content/res/ref_%s_%s_%s.npz' % (xyz, xc, basis)):
+        z = np.load('/content/res/ref_%s_%s_%s.npz' % (xyz, xc, basis)); e0, g0, ts, tg, cv = float(z['e']), z['g'], 0., 0., True
+    else:
+        mf = new_mf(mol, xc); mf.conv_tol = 1e-11; mf.conv_tol_grad = 1e-7
+        e0, g0, ts, tg, cv = run(mf)
+        np.savez('/content/res/ref_%s_%s_%s.npz' % (xyz, xc, basis), e=e0, g=g0)
+        mf = None; cupy.get_default_memory_pool().free_all_blocks()
     print('CASE %s  ref FP64 tight: SCF %.1f s GRAD %.1f s conv %s' % (tag, ts, tg, cv), flush=True)
     rec = dict(case=tag, ref=dict(e=e0, t_scf=ts, t_grad=tg), runs=[])
     for v in [{}] + list(variants):
@@ -62,7 +67,9 @@ for xyz, xc, basis, variants in cases:
         try:
             e, g, ts, tg, cv = run(mf)
         except Exception as ex:
-            print('   FAIL %s %r' % (v, ex), flush=True); continue
+            import traceback; traceback.print_exc()
+            print('   FAIL %s %r' % (v, ex), flush=True)
+            mf = None; cupy.get_default_memory_pool().free_all_blocks(); continue
         st = getattr(mf, 'multifidelity_stats', {}) or {}
         dg = float(abs(g - g0).max())
         print('RESULT %-48s %-28s dE %.1e  max|dg| %.1e  SCF %.2f GRAD %.2f total %.2f conv %s outer %s' % (
