@@ -7,7 +7,7 @@ from gpu4pyscf import dft
 from gpu4pyscf.scf import mixed_precision as mp
 from gpu4pyscf.df.direct_k import DirectDFK
 here = os.path.dirname(os.path.abspath(__file__))
-mol = gto.M(atom=os.path.join(here, '..', '..', '..', 'molecules', 'organic', '113_Taxol.xyz'),
+mol = gto.M(atom=os.path.join(here, '..', '..', '..', 'molecules', 'organic', os.environ.get('MOL', '113_Taxol.xyz')),
             basis='def2-tzvp', verbose=0, max_memory=40000)
 mf = dft.RKS(mol, xc='wb97m-v').density_fit()
 mf.mixed_precision = {'scheme': 'crt'}
@@ -22,15 +22,17 @@ C = X @ V[:, -nocc:] * np.sqrt(2.0)          # occupation-weighted orbitals of t
 sync = cupy.cuda.Stream.null.synchronize
 ref = None
 with mp.final_stage(mf):
-    for nm in [(None, None), (15, 11), (8, 6), (5, 4)]:
+    import gpu4pyscf.df.direct_k as dkm
+    for nm, xc_ in [((15, 11), False), ((15, 11), True)]:
+        dkm.X_CACHE = xc_
         dk = DirectDFK(mol, mf.with_df.auxmol, None, nmod_t=nm[0], nmod_x=nm[1])
         dk.timers = {}
         sync(); t = time.perf_counter()
-        kc, _ = dk.kc_j(C, with_j=False)
+        kc, jj = dk.kc_j(C, with_j=True)
         sync(); tt = time.perf_counter() - t
         if ref is None:
-            ref = kc
-        err = float(abs(kc - ref).max() / abs(ref).max())
-        print('nmod %s: total %.1f s  rel err vs default %.1e   ' % (nm, tt, err) +
+            ref = kc; jref = jj
+        err = max(float(abs(kc - ref).max() / abs(ref).max()), float(abs(jj - jref).max() / abs(jref).max()))
+        print('X_CACHE %s nmod %s: total %.1f s  rel err (K C, J) vs uncached %.1e   ' % (xc_, nm, tt, err) +
               '  '.join('%s %.1f' % kv for kv in sorted(dk.timers.items(), key=lambda kv: -kv[1])), flush=True)
         dk = None; cupy.get_default_memory_pool().free_all_blocks()
