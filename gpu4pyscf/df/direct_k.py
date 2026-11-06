@@ -36,6 +36,10 @@ from gpu4pyscf.df.int3c2e_bdiv import Int3c2eOpt, int2c2e
 from gpu4pyscf.scf.jk import _check_rsh_factors
 
 
+X_CACHE = True          # keep pass-1 X for pass 2 when it fits
+X_CACHE_FRAC = 0.35     # of the free device memory
+
+
 class DirectDFK:
     def __init__(self, mol, auxmol, omega=None, nmod_t=None, nmod_x=None, mem_frac=0.25):
         self.omega_in = omega
@@ -49,6 +53,13 @@ class DirectDFK:
         self.mem_frac = mem_frac
         self._setup = None
         self.timers = None          # set to {} to accumulate synchronised per-step timings (profiling)
+
+    def nmod_x_cached(self):
+        '''moduli of the single half transform when X is cached: it feeds both T (amplified by J^-1, needs nmod_t)
+        and K C (nmod_x), so the more accurate of the two'''
+        if self.nmod_t is None or self.nmod_x is None:
+            return None
+        return max(self.nmod_t, self.nmod_x)
 
     def _t(self, key, t0):
         if self.timers is None:
@@ -118,6 +129,17 @@ class DirectDFK:
                 self._last_compressed = compressed[:, k0:k1]
                 yield aux0, aux1, j3c
 
+    def _compressed(self, st):
+        '''yield (aux0, aux1, compressed integrals [nao_pair, dk]) without unpacking (J-only sweep)'''
+        aux1 = 0
+        buf = cp.empty((st['nao_pair'] * st['batch_size']))
+        for kbatch in range(len(st['aux_offsets']) - 1):
+            t0 = self._t(None, None)
+            compressed = st['eval_j3c'](aux_batch_id=kbatch, out=buf)
+            self._t('int3c2e (J sweep)', t0)
+            aux0, aux1 = aux1, aux1 + compressed.shape[1]
+            yield aux0, aux1, compressed
+
     def _half(self, Cc, j3c, nmod):
         '''X[i, q, r] = sum_p C[p, i] j3c[p, q, r]'''
         nocc = Cc.shape[1]
@@ -145,20 +167,36 @@ class DirectDFK:
         Cc = cp.ascontiguousarray(mol.apply_C_dot(cp.asarray(C), axis=0))
         naux = st['naux']
         T = cp.empty((naux, nocc, nocc))
+        # cache the half-transformed X = C^T (pq|P) of pass 1 when it fits (nocc * nao * naux): pass 2 then skips the
+        # integral recomputation, the unpack and the second half transform (only a J sweep over the integrals)
+        from gpu4pyscf.lib.cupy_helper import get_avail_mem as _gam
+        xbytes = 8 * nocc * mol.nao * naux
+        cache = [] if (X_CACHE and xbytes < X_CACHE_FRAC * _gam()) else None
         for a0, a1, j3c in self._blocks(st):
             t0 = self._t(None, None)
-            X = self._half(Cc, j3c, self.nmod_t)
+            X = self._half(Cc, j3c, self.nmod_t if cache is None else self.nmod_x_cached())
             t0 = self._t('half pass1', t0)
             T[a0:a1] = contract('iqr,qj->rij', X, Cc)
             self._t('T = X C', t0)
+            if cache is not None:
+                cache.append((a0, a1, X))
         W = st['aux_coef']
         # Z = W (W^T T), in column blocks written back into T (naux * nocc^2 is GBs for large molecules)
+        # T_P = C^T (P|pq) C is symmetric in (i, j): apply the metric to the packed i <= j columns only (exact 2x)
+        t0 = self._t(None, None)
         T2 = T.reshape(naux, -1)
+        iu, ju = np.triu_indices(nocc)
+        pij = cp.asarray(iu * nocc + ju)
+        pji = cp.asarray(ju * nocc + iu)
         cb = max(64, int(2.5e8 / (8 * naux)))
-        for c0 in range(0, T2.shape[1], cb):
-            c1 = min(T2.shape[1], c0 + cb)
-            T2[:, c0:c1] = W.dot(W.T.dot(T2[:, c0:c1]))
+        for c0 in range(0, len(iu), cb):
+            c1 = min(len(iu), c0 + cb)
+            blk = W.dot(W.T.dot(T2[:, pij[c0:c1]]))
+            T2[:, pij[c0:c1]] = blk
+            T2[:, pji[c0:c1]] = blk
+            blk = None
         Z = T
+        self._t('metric', t0)
         # the kept fit waits in host memory (naux * nocc^2: GBs for large molecules) until fit_oo()
         self._fit = (Z.get(), C) if keep_fit else None
         T = T2 = None
@@ -169,7 +207,19 @@ class DirectDFK:
         nao = mol.nao
         KC = cp.zeros((nao, nocc))
         Jp = cp.zeros(st['nao_pair']) if with_j else None
-        for a0, a1, j3c in self._blocks(st):
+        if cache is not None:
+            for a0, a1, X in cache:
+                t0 = self._t(None, None)
+                KC += contract('iqr,rij->qj', X, Z[a0:a1])
+                self._t('KC += X Z', t0)
+            cache = None
+            if with_j:
+                for a0, a1, comp in self._compressed(st):
+                    t0 = self._t(None, None)
+                    Jp += comp.dot(cvec[a0:a1])
+                    self._t('J', t0)
+        else:
+          for a0, a1, j3c in self._blocks(st):
             t0 = self._t(None, None)
             X = self._half(Cc, j3c, self.nmod_x)
             t0 = self._t('half pass2', t0)
