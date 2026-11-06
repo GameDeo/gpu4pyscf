@@ -71,6 +71,7 @@ DEFAULTS = dict(
     # dependent AO combinations, where exact operators are physically small.  They are therefore only used for
     # *increments* (noise ~ |D - D_ref|), through the spectral filter inc_filter (surrogate increments projected onto
     # the S eigenvectors with lambda > inc_filter); every absolute term stays exact or FP32.
+    contraction_guess=400.,       # assumed |g| contraction of the first outer step (XC-gradient fusion prediction)
     inc_store=None,               # None: dense FP32 surrogate K increments + exact J | 'int8': INT8 K / INT16 J increments
     inc_filter=0.0,               # lambda threshold of the filter (0: off)
     ref_k='surrogate',            # K matrix at D_ref: 'surrogate' (dense K_s(D_ref)) | 'ace' (K C (C^T K C)^-1 (K C)^T
@@ -568,6 +569,18 @@ def _precision_ctx(mf, opt):
     return contextlib.nullcontext()
 
 
+def _host_avail():
+    '''available host memory in bytes (MemAvailable), inf when unknown'''
+    try:
+        with open('/proc/meminfo') as f:
+            for ln in f:
+                if ln.startswith('MemAvailable:'):
+                    return float(ln.split()[1]) * 1024
+    except OSError:
+        pass
+    return float('inf')
+
+
 def kernel(mf, dm0=None, **kwargs):
     opt = dict(DEFAULTS)
     cfg = getattr(mf, 'multifidelity', None)
@@ -600,6 +613,7 @@ def kernel(mf, dm0=None, **kwargs):
         g_in = _grid(mol, opt['inner_grid'], mf.grids)
         g_nlc1 = _grid(mol, opt['stage1_nlc_grid'], mf.nlcgrids) if with_nlc else None
         dk_fr = dk_lr = None
+        exact_on_host = False
         from gpu4pyscf.lib.cupy_helper import get_avail_mem as _gam
         free = _gam()                      # free device memory incl. the cached pool blocks
         if opt['exact_k'] == 'auto':
@@ -607,8 +621,20 @@ def kernel(mf, dm0=None, **kwargs):
             from pyscf.df import addons as _addons
             naux_x = _addons.make_auxmol(mol, mf.with_df.auxbasis).nao_nr() if mf.with_df.auxbasis else 3 * mol.nao
             stored = 8 * naux_x * mol.nao * (mol.nao + 1) / 2 * (2 if omega != 0 else 1)
-            opt['exact_k'] = 'direct' if stored > 0.45 * free else 'stored'
-        if opt['exact_k'] == 'direct' and opt['inc_store'] is None and not no_k:
+            # stored tensors that do not fit on the device stay in host memory and are streamed (as stock gpu4pyscf
+            # does): ~1 s of PCIe per pass at 10 GB, against a full integral recomputation per checkpoint for 'direct'
+            # (12 s per checkpoint for Mg porphin on a T4).  Direct only when host memory cannot hold them either.
+            # (the DF module places each tensor on the device or in host memory by itself)
+            if stored <= 0.45 * free:
+                opt['exact_k'] = 'stored'
+            elif stored <= 0.45 * free + 0.5 * _host_avail():
+                opt['exact_k'] = 'stored'
+                exact_on_host = True       # (partly) host-resident: the surrogates go to compact FP32 storage
+            else:
+                opt['exact_k'] = 'direct'
+            log.info('multi-fidelity: exact tensors %.1f GB, device free %.1f GB, host available %.1f GB',
+                     stored / 1e9, free / 1e9, _host_avail() / 1e9)
+        if (opt['exact_k'] == 'direct' or exact_on_host) and opt['inc_store'] is None and not no_k:
             # no exact DF tensor in memory: the inner-loop J must not fall back to mf.get_j (which streams the full
             # FP64 tensor from host memory every cycle): FP32 J and K surrogate tensors (pinned host memory when they
             # do not fit; the Taxol configuration), usable as absolute terms in stage 1 too
@@ -807,8 +833,12 @@ def kernel(mf, dm0=None, **kwargs):
             levels.append(level)
             grids_x = g_cheap if level == 'cheap' else mf.grids
             grids_nlc = g_nlc_cheap if level == 'cheap' else mf.nlcgrids
+            # fuse the XC nuclear gradient only where this checkpoint is predicted to be the last one: |g| after the
+            # last inner loop ~ |g_prev| / contraction (measured on the previous outer step, else contraction_guess)
+            ratio = (hist[-2][0] / max(hist[-1][0], 1e-300)) if len(hist) >= 2 else opt['contraction_guess']
+            pred = hist[-1][0] / max(ratio, 1.0) if hist else float('inf')
             want_grad = (level == 'exact' and opt['fuse_grad'] and opt['fine_vco'] and xctype in ('GGA', 'MGGA')
-                         and last_inner_tol is not None and last_inner_tol < conv_tol_grad)
+                         and last_inner_tol is not None and last_inner_tol < conv_tol_grad and pred < conv_tol_grad)
             lvl_ctx = _moduli_ctx(opt['cheap_moduli'] if level == 'cheap' else
                                   opt['medium_moduli'] if level == 'medium' else None)
             # exact operator on the occupied space
