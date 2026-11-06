@@ -149,6 +149,8 @@ def outer_loop(name, J_s, K_s, Co, nouter=3, inner_factor=float(os.environ.get('
         gs.append(gx)
         if outer == nouter:
             break
+        if hasattr(K_s, 'set_ref'):
+            K_s.set_ref(Dref)
         Jsr = J_s(Dref) if J_s is not J_ex else None
         W = Fx @ Co - (h1 + Jx - 0.5 * K_s(Dref)) @ Co
         SC = S @ Co
@@ -177,6 +179,104 @@ def err(fx, ft, X):
     a, b = fx(X), ft(X)
     return np.linalg.norm(Cv.T @ (a - b) @ Co0) / np.linalg.norm(Cv.T @ a @ Co0)
 
+
+ISDF_FIX = os.environ.get('ISDF_FIX') == '1'
+ISDF_TIK = float(os.environ.get('ISDF_TIK', '0'))
+# ---------------------------------------------------------------- ISDF of occupied-pair products + ACE
+def isdf_ace_k(ng, Co_sel, auxbasis='def2-universal-jkfit', atom_grid=None, weighted=True):
+    """K(D) for D = 2 C C^T, memory-light:
+      psi_i(r) psi_j(r) ~= sum_g zeta_g(r) psi_i(r_g) psi_j(r_g)        (ISDF, points fixed, zeta from current orbitals)
+      V_g(r) = Coulomb potential of zeta_g via the grid-fitted aux basis (same machinery as grid-DF J)
+      (K psi_j)(r) = sum_g V_g(r) Q(r, g) psi_j(r_g),  Q = Psi Psi_g^T     (all dense GEMMs)
+      W = K(D) C = 2 Phi^T diag(w) (K psi)  ->  ACE  K_s = W (C^T W)^-1 W^T
+    Points: QR-pivoted on the (sqrt(w)-weighted) occupied pair products of Co_sel, then kept fixed."""
+    t = time.time()
+    g = dft.gen_grid.Grids(mol)
+    g.atom_grid = atom_grid or grid
+    g.prune = dft.gen_grid.nwchem_prune
+    g.build()
+    phi = dft.numint.eval_ao(mol, g.coords)
+    w = g.weights
+    auxmol = df.addons.make_auxmol(mol, auxbasis)
+    V = gto.mole.intor_cross('int2c2e', auxmol, gto.fakemol_for_charges(g.coords))     # (naux, Nr)
+    Mc = scipy.linalg.cho_factor(auxmol.intor('int2c2e'))
+    Psi = phi @ Co_sel
+    iu = np.triu_indices(nocc)
+    Z = Psi[:, iu[0]] * Psi[:, iu[1]]
+    if weighted:
+        Z = Z * np.sqrt(w)[:, None]
+    _, _, piv = scipy.linalg.qr(Z.T, mode='economic', pivoting=True)
+    piv = np.sort(piv[:ng])
+    log('  ISDF-ACE ng=%d (%.1f x nocc) on %d grid points, setup %.1f s' % (ng, ng / nocc, len(w), time.time() - t))
+
+    def occ(D):
+        # S-orthonormal C with D = 2 C C^T
+        e, U = scipy.linalg.eigh(S @ D @ S, S)
+        return U[:, -nocc:] * np.sqrt(np.maximum(e[-nocc:], 0) / 2)
+
+    ref = {}
+
+    def set_ref(D):
+        ref.clear()
+        if ISDF_FIX:
+            ref['Vg'] = _vg(occ(D))
+
+    def _vg(C):
+        Psi = phi @ C
+        Pg = Psi[piv]
+        G = (Pg @ Pg.T) ** 2
+        sc = 1 / np.sqrt(np.diag(G))
+        ev, U = np.linalg.eigh(G * sc[:, None] * sc)
+        keep = ev > ev[-1] * 1e-12
+        Gi = sc[:, None] * ((U[:, keep] / ev[keep]) @ U[:, keep].T) * sc
+        zeta = ((Psi @ Pg.T) ** 2) @ Gi
+        return V.T @ scipy.linalg.cho_solve(Mc, V @ (w[:, None] * zeta))
+
+    def k(D):
+        C = occ(D)
+        if 'Vg' in ref:
+            # frozen zeta and potentials: per call only (Nr x ng x nocc) GEMMs, smooth in the orbitals
+            Psi = phi @ C
+            Pg = Psi[piv]
+            Kpsi = (ref['Vg'] * (Psi @ Pg.T)) @ Pg
+            W = 2 * phi.T @ (w[:, None] * Kpsi)
+            M = C.T @ W
+            M = 0.5 * (M + M.T)
+            return W @ np.linalg.solve(M, W.T)
+        Psi = phi @ C
+        Pg = Psi[piv]
+        G = (Pg @ Pg.T) ** 2
+        sc = 1 / np.sqrt(np.diag(G))
+        ev, U = np.linalg.eigh(G * sc[:, None] * sc)
+        if ISDF_TIK:
+            # Tikhonov: smooth in the orbitals (a hard eigenvalue cut changes rank as the orbitals move)
+            lam = ISDF_TIK * ev[-1]
+            Gi = sc[:, None] * ((U * (ev / (ev ** 2 + lam ** 2))) @ U.T) * sc
+        else:
+            keep = ev > ev[-1] * 1e-12
+            Gi = sc[:, None] * ((U[:, keep] / ev[keep]) @ U[:, keep].T) * sc
+        Q = Psi @ Pg.T                                   # (Nr, ng) = sum_i psi_i(r) psi_i(r_g)
+        zeta = (Q ** 2) @ Gi                             # (Nr, ng)
+        c = scipy.linalg.cho_solve(Mc, V @ (w[:, None] * zeta))
+        Vg = V.T @ c                                     # (Nr, ng)
+        Kpsi = (Vg * Q) @ Pg                             # (Nr, nocc)
+        W = 2 * phi.T @ (w[:, None] * Kpsi)
+        M = C.T @ W
+        M = 0.5 * (M + M.T)
+        return W @ np.linalg.solve(M, W.T)
+    k.set_ref = set_ref
+    return k
+
+
+if os.environ.get('ISDF'):
+    gj = gridj_build('def2-universal-jkfit', grid)
+    for f in [float(x) for x in os.environ['ISDF'].split(',')]:
+        Ki = isdf_ace_k(int(f * nocc), Co0)
+        # ACE is exact only on the occupied space of D: compare W = K(D) C (ov block) at D0, and the response
+        e0 = err(K_ex, Ki, D0)
+        log('  K ISDF-ACE %.0fx nocc  ov rel err at D0 %.1e' % (f, e0))
+        outer_loop('isdf%.0fx K + grid J' % f, gj, Ki, Co0)
+    sys.exit()
 
 if os.environ.get('SGX'):
     gj = gridj_build('def2-universal-jkfit', grid)

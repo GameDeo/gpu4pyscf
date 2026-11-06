@@ -1,0 +1,9 @@
+[    0.0 s] nao 253 nocc 25 lambda_min(S) 1.1e-05
+[    7.9 s] D0: surrogate SCF 8 cycles
+[   10.0 s]   grid-J def2-universal-jkfit (50, 194): 85528 points, naux 635, 2.0 s
+[   17.6 s]   ISDF-ACE ng=100 (4.0 x nocc) on 85528 grid points, setup 7.6 s
+[   19.0 s]   K ISDF-ACE 4x nocc  ov rel err at D0 1.3e-02
+[  343.7 s] isdf4x K + grid J      outer |g|: 1.46e-02 2.12e-04 1.46e-05 1.52e-06  ratios: 69 15 10
+[  351.0 s]   ISDF-ACE ng=200 (8.0 x nocc) on 85528 grid points, setup 7.2 s
+[  352.4 s]   K ISDF-ACE 8x nocc  ov rel err at D0 5.1e-04
+[ 1304.6 s] isdf8x K + grid J      outer |g|: 1.46e-02 3.99e-05 9.80e-07 4.95e-08  ratios: 366 41 20
