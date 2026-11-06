@@ -10,7 +10,7 @@ from pyscf import gto, scf, lo
 st = np.load('logs/a2_stats.npz')
 q, lN, d, nf = st['q'], st['lN'], st['d'], st['nf']
 bpa = sys.argv[1]; tax = sys.argv[2]
-thrs = [1e-10, 1e-9, 1e-8, 1e-7, 1e-6]
+thrs = [1e-9, 1e-8, 1e-7]
 bins = np.linspace(0, 30, 61)
 sig = q >= 1e-13
 Wb_bpa = (nf[:, None] * nf[None, :] * sig).sum(0)          # weight of transformed shell b
