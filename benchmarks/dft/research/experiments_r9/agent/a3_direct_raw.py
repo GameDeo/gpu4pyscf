@@ -53,12 +53,12 @@ def x_of(C, p='fp64'):
 
 
 def t_of(X, C):
-    return np.einsum('Pmi,mj->Pij', X, C)
+    return np.einsum('Pmi,mj->Pij', X, C, optimize=True)
 
 
 def kc_of(X, T):
     Z = scipy.linalg.cho_solve(Mc, T.reshape(naux, -1)).reshape(T.shape)
-    return 2 * np.einsum('Pmi,Pij->mj', X, Z)
+    return 2 * np.einsum('Pmi,Pij->mj', X, Z, optimize=True)
 
 
 def pg(F, Co, D):

@@ -63,8 +63,8 @@ def x_of(C, prec='fp64'):
 
 
 def kc_from_x(X, C):
-    T = np.einsum('Pmi,mj->Pij', X, C)
-    return 2 * np.einsum('Pmi,Pij->mj', X, T)
+    T = np.einsum('Pmi,mj->Pij', X, C, optimize=True)
+    return 2 * np.einsum('Pmi,Pij->mj', X, T, optimize=True)
 
 
 def energy(D, J, Co, WK):

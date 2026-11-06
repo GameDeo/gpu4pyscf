@@ -35,29 +35,29 @@ shc = np.array([mol.bas_coord(i) for i in range(nsh)])
 
 
 def kc(X):
-    T = np.einsum('Pmi,mj->Pij', X, L)
+    T = np.einsum('Pmi,mj->Pij', X, L, optimize=True)
     Z = scipy.linalg.cho_solve(Mc, T.reshape(naux, -1)).reshape(T.shape)
-    return 2 * np.einsum('Pmi,Pij->mj', X, Z), T
+    return 2 * np.einsum('Pmi,Pij->mj', X, Z, optimize=True), T
+
+
+shell_of = np.repeat(np.arange(nsh), nf)
 
 
 def build_x(thr):
-    X = np.zeros((naux, nao, nocc))
+    X = np.empty((naux, nao, nocc))
     kept = tot = 0.0
-    keep_d = []
     for a in range(nsh):
-        Ra = R[sl[a]]                               # (fa, nao, naux)
-        for b in range(nsh):
-            if q[a, b] < 1e-13:
-                continue
-            tot += nf[a] * nf[b] * nocc
-            m = q[a, b] * lN[b] >= thr if thr > 0 else np.ones(nocc, bool)
-            if not m.any():
-                continue
-            kept += nf[a] * nf[b] * m.sum()
-            X[:, sl[a]][:, :, m] += np.einsum('mnP,ni->Pmi', Ra[:, sl[b]], L[sl[b]][:, m])
+        sigb = q[a] >= 1e-13                                    # (nsh,)
+        m = (q[a][:, None] * lN >= thr) & sigb[:, None] if thr > 0 else np.repeat(sigb[:, None], nocc, 1)
+        tot += nf[a] * (nf * sigb).sum() * nocc
+        kept += nf[a] * (nf[:, None] * m).sum()
+        Lm = L * m[shell_of]
+        X[:, sl[a]] = np.einsum('mnP,ni->Pmi', R[sl[a]], Lm, optimize=True)
     return X, kept / tot
 
 
+np.savez('logs/a2_stats.npz', q=q, lN=lN, d=np.linalg.norm(shc[:, None, :] - cen[None, :, :], axis=2), nf=nf,
+         shc=shc, cen=cen)
 Xe, _ = build_x(0)
 KCe, Te = kc(Xe)
 P = np.eye(nao) - 0.5 * (2 * Co @ Co.T) @ mol.intor('int1e_ovlp')
@@ -65,7 +65,7 @@ EK = -0.5 * np.einsum('mi,mi', L, KCe)
 log('E_K (exact DF) %.10f  |P^T KC| %.3e' % (EK, np.linalg.norm(P.T @ KCe)))
 # (i, j) pair sparsity of T
 tn = np.sqrt(np.einsum('Pij,Pij->ij', Te, Te))
-for thr in (1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5):
+for thr in (1e-9, 1e-8, 1e-7, 1e-6):
     X, frac = build_x(thr)
     K, T = kc(X)
     dE = -0.5 * np.einsum('mi,mi', L, K) - EK

@@ -608,6 +608,11 @@ def kernel(mf, dm0=None, **kwargs):
             naux_x = _addons.make_auxmol(mol, mf.with_df.auxbasis).nao_nr() if mf.with_df.auxbasis else 3 * mol.nao
             stored = 8 * naux_x * mol.nao * (mol.nao + 1) / 2 * (2 if omega != 0 else 1)
             opt['exact_k'] = 'direct' if stored > 0.45 * free else 'stored'
+        if opt['exact_k'] == 'direct' and opt['inc_store'] is None and not no_k:
+            # no exact DF tensor in memory: the inner-loop J must not fall back to mf.get_j (which streams the full
+            # FP64 tensor from host memory every cycle): FP32 J and K surrogate tensors (pinned host memory when they
+            # do not fit; the Taxol configuration), usable as absolute terms in stage 1 too
+            opt['inc_store'] = 'f32'
         log.info('multi-fidelity: exact_k=%s inc_store=%s inc_filter=%g ref_k=%s',
                  opt['exact_k'], opt['inc_store'], opt['inc_filter'], opt['ref_k'])
         if opt['exact_k'] == 'direct':
