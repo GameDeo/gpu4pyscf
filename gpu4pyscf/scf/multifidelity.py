@@ -40,7 +40,11 @@ from gpu4pyscf.lib.cupy_helper import tag_array
 
 DEFAULTS = dict(
     inner_grid=(30, 110),         # coarse XC grid of the surrogate ((20,50): 4 outers on BPA, (30,110): 3)
-    stage1_nlc_grid=(10, 26),     # VV10 grid of the first (cheap) stage; later VV10 is frozen inside Delta~
+    stage1_nlc_grid=(10, 26),     # VV10 grid of the first (cheap) stage and of the inner-loop VV10 increments
+    inner_nlc_grid=None,          # VV10 grid of the inner-loop increments (None: stage1_nlc_grid)
+    inner_nlc=True,               # inner loop: VV10 response as coarse-grid increments V(D) - V(D_ref) (False: VV10
+                                  # frozen inside Delta~; that response alone was |g| 1.6e-5 of the 1.9e-5 residual
+                                  # after the first outer step on BPA wB97M-V)
     surrogate_aux='def2-svp-ri',  # aux basis of the exchange surrogate
     k_increment='fp32',           # 'fp32' | 'fp16' | 'exact' (exact = surrogate DF-K at every inner step)
                                   # fp16 noise (~1e-3 of K(dD)) stalls the inner loop for BPA-size systems
@@ -332,7 +336,7 @@ class SurrogateK8:
 
     def _ensure(self):
         if not self._built:
-            self.t.build()
+            self.t.build(mem_frac=0.1)   # after the exact tensor: CRT build temporaries stay small
             self._built = True
 
     def k_ref(self, dm):
@@ -601,7 +605,7 @@ def _plan_storage(mf, opt, omega, free, no_k):
     nops = 2 if omega != 0 and not no_k else 1
     dense = 0. if no_k else 4. * nks * nao * nao + 8. * nks * npairs   # SurrogateK: FP64 DF + unpacked FP32
     f32 = 0. if no_k else 4. * npairs * (nks + njs)                     # stored FP32 K and J surrogates
-    dev = free - max(2.5e9, 0.2 * free)       # work space: XC blocks, CRT buffers, gradient
+    dev = free - max(4e9, 0.3 * free)         # work space: XC blocks, CRT build buffers, K loop, gradient
     host = 0.8 * _host_avail() - 1.5e9         # the process itself, pinned staging, gradient
     res = dict(mode='stored', f32=False, lr_host=False, lr_direct=False)
     if nops * E + dense <= dev:
@@ -655,6 +659,8 @@ def kernel(mf, dm0=None, **kwargs):
             ni.build(mol, mf.grids.coords)
         g_in = _grid(mol, opt['inner_grid'], mf.grids)
         g_nlc1 = _grid(mol, opt['stage1_nlc_grid'], mf.nlcgrids) if with_nlc else None
+        g_nlc_in = (_grid(mol, opt['inner_nlc_grid'], mf.nlcgrids) if opt['inner_nlc_grid'] else g_nlc1) \
+            if with_nlc else None
         dk_fr = dk_lr = None
         exact_on_host = False
         from gpu4pyscf.lib.cupy_helper import get_avail_mem as _gam
@@ -803,7 +809,7 @@ def kernel(mf, dm0=None, **kwargs):
             if getattr(mf.with_df, '_cderi', None) is None and opt['exact_k'] != 'direct':
                 mf.with_df.build()                 # exact tensor first: J then takes the fast path
             if js is not None:
-                js.build()                         # stored Coulomb tensor (INT16 increments / FP32)
+                js.build(mem_frac=0.1)             # stored Coulomb tensor (INT16 increments / FP32)
             if sk8 is not None:
                 sk8.ensure()
             if j_abs:
@@ -989,6 +995,10 @@ def kernel(mf, dm0=None, **kwargs):
                 else:
                     vks_ref = sk.k_ref(dm)
             vc = vxc_coarse(dm)
+            vn_ref = None
+            if with_nlc and opt['inner_nlc']:
+                with tim('nlc_coarse'):
+                    vn_ref = ni.nr_nlc_vxc(mol, g_nlc_in, nlc_xc, dm)[2]
             # the exact J of the checkpoint is the reference; the stored surrogate J only supplies increments
             # (its rounding then scales with |D - D_ref|)
             vjs_ref = vj
@@ -1032,6 +1042,9 @@ def kernel(mf, dm0=None, **kwargs):
                         vci = vc + cx.inc(dC)
                 else:
                     vci = vxc_coarse(dm)
+                if vn_ref is not None:
+                    with tim('nlc_coarse inc'):
+                        vci = vci + (ni.nr_nlc_vxc(mol, g_nlc_in, nlc_xc, dm)[2] - vn_ref)
                 if js is not None:
                     with tim('J'):
                         dJ = js.j(dm - Dref_tag)
