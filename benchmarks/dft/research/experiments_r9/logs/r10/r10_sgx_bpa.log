@@ -1,0 +1,16 @@
+nao 623 nocc 61
+exact |K(dD)_ov| 3.106e-02
+SVP-RI DF surrogate: rel. response error 9.51e-04
+SGX grid (20, 50) points 40704 block 483
+SGX (20, 50) fit=True: rel. response error 3.99e-03  (absolute D0 ov: 1.00e-03)  time/call 41.36 s
+SGX grid (20, 50) points 40704 block 483
+SGX (20, 50) fit=False: rel. response error 2.02e-02  (absolute D0 ov: 2.01e-02)  time/call 45.95 s
+SGX grid (30, 110) points 81408 block 483
+SGX (30, 110) fit=True: rel. response error 9.14e-04  (absolute D0 ov: 2.42e-04)  time/call 92.39 s
+SGX grid (30, 110) points 81408 block 483
+SGX (30, 110) fit=False: rel. response error 4.40e-03  (absolute D0 ov: 3.88e-03)  time/call 92.50 s
+SGX grid (40, 194) points 174080 block 483
+SGX (40, 194) fit=True: rel. response error 3.37e-04  (absolute D0 ov: 1.78e-04)  time/call 197.89 s
+SGX grid (40, 194) points 174080 block 483
+SGX (40, 194) fit=False: rel. response error 8.27e-04  (absolute D0 ov: 7.75e-04)  time/call 197.85 s
+ALLDONE

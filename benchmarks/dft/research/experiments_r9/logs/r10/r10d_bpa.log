@@ -1,0 +1,188 @@
+CASE Bisphenol_A wb97m-v/def2-tzvp nao=623  ref FP64 tight: SCF 0.0 s GRAD 0.0 s conv True
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+small_rho_cutoff = 0
+<class 'gpu4pyscf.df.df_jk.DFRKS'> does not have attributes  mixed_precision multifidelity
+multi-fidelity: storage plan stored (npairs 161533 naux 1567: exact 2.02 GB x 2, surrogates dense 2.96 / f32 1.32 GB; budget device 10.7 GB host 7.6 GB)
+multi-fidelity: exact_k=stored inc_store=None inc_filter=0 ref_k=surrogate
+Initial guess from minao
+multi-fidelity: stage 1 8 cycles, |g| = 7.44e-04
+multi-fidelity: outer 0 (exact)  E = -731.649396999330  |g| = 7.667e-03
+    inner cycles 7  |g_s| = 4.14e-06
+    model energy of the next density -731.649404502727
+multi-fidelity: outer 1 (exact)  E = -731.649404509963  |g| = 1.469e-05
+    model energy error 7.236e-09 (0.12 g_prev g = 1.4e-08)
+multi-fidelity SCF: E = -731.649404509963  converged = True  outer 2 inner 7 stage1 8
+converged SCF energy = -731.649404509963
+
+
+******** <class 'gpu4pyscf.df.grad.rks.Gradients'> for <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+unit = Eh/Bohr
+max_memory 14000 MB (current use 1378 MB)
+--------------- DFRKS gradients ---------------
+         x                y                z
+0 C     0.0011248780     0.0061817114    -0.0000261535
+1 C     0.0083837743     0.0082534226     0.0176557632
+2 H     0.0035277239    -0.0130531753    -0.0021759484
+3 H     0.0043648376    -0.0006600640    -0.0120984279
+4 H    -0.0146468361    -0.0008791107    -0.0016910274
+5 C     0.0084446883     0.0081965120    -0.0176705185
+6 H    -0.0146561857    -0.0008748064     0.0016603678
+7 H     0.0043729422    -0.0006875964     0.0120642358
+8 H     0.0035477451    -0.0130204231     0.0022680462
+9 C    -0.0113847998     0.0047671676    -0.0000272457
+10 C     0.0066933563    -0.0016735543     0.0015822924
+11 C     0.0052631689     0.0005667609    -0.0003379497
+12 C     0.0085744555     0.0040748025     0.0011159758
+13 H     0.0092983218    -0.0108311189    -0.0000895800
+14 C     0.0003165584    -0.0060354630    -0.0003447533
+15 H     0.0070010857     0.0090308201     0.0000058445
+16 C     0.0185307095    -0.0021090098    -0.0058241623
+17 H    -0.0037418884    -0.0111526642    -0.0003339952
+18 H    -0.0041650735     0.0101608023     0.0005462645
+19 C    -0.0029821227    -0.0144826369     0.0000670244
+20 C    -0.0014378503     0.0055049729    -0.0013803614
+21 C    -0.0016908675     0.0056926912     0.0013649254
+22 C    -0.0004655999     0.0044141114     0.0049682626
+23 H    -0.0029863896     0.0102582661    -0.0109993836
+24 C    -0.0002952856     0.0041788631    -0.0053542084
+25 H    -0.0029470676     0.0102254749     0.0109337517
+26 C    -0.0112756040     0.0130648729     0.0002864778
+27 H     0.0013024249    -0.0035091185    -0.0109380760
+28 H     0.0013000603    -0.0034528651     0.0109963923
+29 O     0.0157863001    -0.0238035131     0.0000054888
+30 H    -0.0017178752    -0.0033771878     0.0000021287
+31 O    -0.0303380217     0.0080582293     0.0048423431
+32 H    -0.0030959364    -0.0030189994    -0.0010734115
+----------------------------------------------
+   peak host RSS 1.35 GB
+RESULT Bisphenol_A wb97m-v/def2-tzvp nao=623            {}                           dE 1.7e-10  max|dg| 3.8e-07  SCF 15.71 GRAD 4.96 total 20.67 conv True outer 2
+   model-energy error vs next exact ['7.2e-09']
+   cycles {'stage1': 8, 'inner': 7, 'outer': 2} outer |g| ['7.7e-03', '1.5e-05']
+     xc_fine+grad              2.98 s    1
+     K exact                   2.16 s    2
+     K_s stage1                1.65 s    9
+     xc_fine                   1.30 s    1
+     DF build                  1.24 s    1
+     nlc_fine                  1.09 s    2
+     eig                       0.67 s   15
+     xc_coarse32               0.66 s    8
+     xc_coarse inc             0.60 s    7
+     setup                     0.59 s    1
+     J                         0.51 s   16
+     xc_coarse                 0.39 s    2
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+small_rho_cutoff = 0
+multi-fidelity: exact_k=direct inc_store=f32 inc_filter=0 ref_k=surrogate
+multi-fidelity: direct passes with 4.63 GB integral cache per operator
+Initial guess from minao
+multi-fidelity: stage 1 8 cycles, |g| = 5.92e-04
+    direct K: integral cache holds 100 % of the aux batches
+multi-fidelity: outer 0 (exact)  E = -731.649395100574  |g| = 1.006e-02
+    inner cycles 6  |g_s| = 9.35e-06
+    model energy of the next density -731.649404533640
+    direct K: integral cache holds 100 % of the aux batches
+multi-fidelity: outer 1 (exact)  E = -731.649404509978  |g| = 9.234e-05
+    model energy error -2.366e-08 (0.12 g_prev g = 1.1e-07)
+    inner cycles 7  |g_s| = 3.95e-08
+    model energy of the next density -731.649404510543
+    direct K: integral cache holds 100 % of the aux batches
+multi-fidelity: outer 2 (exact)  E = -731.649404510550  |g| = 1.294e-06
+    model energy error 7.503e-12 (0.12 g_prev g = 1.4e-11)
+multi-fidelity SCF: E = -731.649404510550  converged = True  outer 3 inner 13 stage1 8
+converged SCF energy = -731.64940451055
+
+
+******** <class 'gpu4pyscf.df.grad.rks.Gradients'> for <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+unit = Eh/Bohr
+max_memory 14000 MB (current use 1539 MB)
+--------------- DFRKS gradients ---------------
+         x                y                z
+0 C     0.0011249537     0.0061818418    -0.0000261680
+1 C     0.0083837123     0.0082535213     0.0176558055
+2 H     0.0035277772    -0.0130532302    -0.0021759321
+3 H     0.0043648441    -0.0006600599    -0.0120984607
+4 H    -0.0146467942    -0.0008791276    -0.0016910101
+5 C     0.0084446277     0.0081966066    -0.0176705551
+6 H    -0.0146561438    -0.0008748231     0.0016603491
+7 H     0.0043729511    -0.0006875895     0.0120642682
+8 H     0.0035477949    -0.0130204798     0.0022680272
+9 C    -0.0113849294     0.0047671182    -0.0000271804
+10 C     0.0066931778    -0.0016736360     0.0015822207
+11 C     0.0052631913     0.0005667904    -0.0003380100
+12 C     0.0085746160     0.0040748610     0.0011160748
+13 H     0.0092983035    -0.0108310799    -0.0000895777
+14 C     0.0003165469    -0.0060356300    -0.0003446661
+15 H     0.0070010560     0.0090308007     0.0000058473
+16 C     0.0185307039    -0.0021089500    -0.0058242278
+17 H    -0.0037418639    -0.0111526446    -0.0003340027
+18 H    -0.0041650369     0.0101607829     0.0005462741
+19 C    -0.0029821253    -0.0144825577     0.0000670081
+20 C    -0.0014377973     0.0055050160    -0.0013806228
+21 C    -0.0016908051     0.0056927341     0.0013651939
+22 C    -0.0004657067     0.0044141818     0.0049682835
+23 H    -0.0029863438     0.0102582318    -0.0109993106
+24 C    -0.0002954011     0.0041789255    -0.0053542217
+25 H    -0.0029470235     0.0102254471     0.0109336909
+26 C    -0.0112754350     0.0130648045     0.0002864669
+27 H     0.0013023983    -0.0035091419    -0.0109381507
+28 H     0.0013000365    -0.0034528917     0.0109964695
+29 O     0.0157861260    -0.0238037704     0.0000054898
+30 H    -0.0017177512    -0.0033771126     0.0000021275
+31 O    -0.0303381813     0.0080582852     0.0048423343
+32 H    -0.0030958261    -0.0030190412    -0.0010734629
+----------------------------------------------
+   peak host RSS 1.73 GB
+RESULT Bisphenol_A wb97m-v/def2-tzvp nao=623            {'exact_k': 'cached'}        dE -4.1e-10  max|dg| 1.4e-07  SCF 26.43 GRAD 4.77 total 31.20 conv True outer 3
+   model-energy error vs next exact ['-2.4e-08', '7.5e-12']
+   cycles {'stage1': 8, 'inner': 13, 'outer': 3} outer |g| ['1.0e-02', '9.2e-05', '1.3e-06']
+     K exact                   7.08 s    3
+     xc_fine+grad              6.11 s    2
+     DF build                  1.88 s    1
+     nlc_fine                  1.66 s    3
+     xc_fine                   1.40 s    1
+     xc_coarse inc             1.26 s   13
+     K_s inc                   1.01 s   13
+     eig                       0.95 s   21
+     xc_coarse32               0.78 s    8
+     setup                     0.75 s    1
+     xc_coarse                 0.64 s    3
+     K_s stage1                0.62 s    9
+ALLDONE
