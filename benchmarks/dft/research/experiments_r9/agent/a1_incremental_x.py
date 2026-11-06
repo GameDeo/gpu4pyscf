@@ -139,6 +139,18 @@ def outer(tau, prec):
         g_true = 2 * np.linalg.norm((np.eye(nao) - D @ S / 2).T @ (Fh @ Co - 0.5 * WKt))
         E_used, E_true = energy(D, J, Co, WK), energy(D, J, Co, WKt)
         rows.append((k, g_used, g_true, E_used - Estar, E_true - Estar, (Epred - E_true) if Epred is not None else np.nan, info))
+        if os.environ.get('DME') and k >= 1:
+            # energy-weighted density from the model Fock (no exact checkpoint at D_k) vs from the exact Fock
+            Kx = df.df_jk.get_jk(dfx, D, hermi=1, with_j=False)[1]
+            Fx = Fh - 0.5 * Kx
+            Fm = Fh - 0.5 * K_s(D) + Delta
+            dme = 2 * Co @ (Co.T @ (Fm - Fx) @ Co) @ Co.T
+            s1 = -mol.intor('int1e_ipovlp')
+            dg = np.zeros((mol.natm, 3))
+            for a, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+                dg[a] -= 2 * np.einsum('xij,ij->x', s1[:, p0:p1], dme[p0:p1])
+            log('  [DME] k=%d max|dg_nuc| from model oo-block %.1e  |oo err| %.1e' % (k,
+                np.abs(dg).max(), np.linalg.norm(Co.T @ (Fm - Fx) @ Co)))
         log('  k=%d |g| used %.2e true %.2e  E-E*: used %.1e true %.1e  model-pred err %.1e  %s' % rows[-1])
         if k == NOUTER:
             break
