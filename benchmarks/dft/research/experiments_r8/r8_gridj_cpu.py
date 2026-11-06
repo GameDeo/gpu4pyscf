@@ -180,6 +180,7 @@ def err(fx, ft, X):
     return np.linalg.norm(Cv.T @ (a - b) @ Co0) / np.linalg.norm(Cv.T @ a @ Co0)
 
 
+ISDF_NV = float(os.environ.get('ISDF_NV', '0'))
 ISDF_FIX = os.environ.get('ISDF_FIX') == '1'
 ISDF_TIK = float(os.environ.get('ISDF_TIK', '0'))
 # ---------------------------------------------------------------- ISDF of occupied-pair products + ACE
@@ -203,6 +204,13 @@ def isdf_ace_k(ng, Co_sel, auxbasis='def2-universal-jkfit', atom_grid=None, weig
     Psi = phi @ Co_sel
     iu = np.triu_indices(nocc)
     Z = Psi[:, iu[0]] * Psi[:, iu[1]]
+    if ISDF_NV:
+        # response-adapted points: also occupied x low-virtual products psi_i chi_a (what the inner-loop
+        # response is made of), virtuals from the surrogate Fock at D0
+        Dsel = 2 * Co_sel @ Co_sel.T
+        _, Cf = scipy.linalg.eigh(h1 + J_jf(Dsel) - 0.5 * K_svp(Dsel), S)
+        Chi = phi @ Cf[:, nocc:nocc + int(ISDF_NV * nocc)]
+        Z = np.hstack([Z, (Psi[:, :, None] * Chi[:, None, :]).reshape(len(w), -1)])
     if weighted:
         Z = Z * np.sqrt(w)[:, None]
     _, _, piv = scipy.linalg.qr(Z.T, mode='economic', pivoting=True)
