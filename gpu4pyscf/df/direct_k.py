@@ -52,6 +52,11 @@ class DirectDFK:
         self.nmod_t, self.nmod_x = nmod_t, nmod_x
         self.mem_frac = mem_frac
         self._setup = None
+        # raw-integral cache: aux batches whose compressed integrals fit in `cache_bytes` of device memory are kept
+        # and reused by every later pass; the rest are recomputed.  The same algorithm runs from fully cached (the
+        # cost of a stored DF tensor, without its build) to fully direct, with time and memory varying continuously.
+        self.cache_bytes = 0
+        self._icache = {}
         self.timers = None          # set to {} to accumulate synchronised per-step timings (profiling)
 
     def nmod_x_cached(self):
@@ -72,6 +77,8 @@ class DirectDFK:
         return t
 
     def _prepare(self, nocc):
+        if self._setup is not None and self._setup['nocc'] >= nocc and self._icache:
+            return self._setup             # the cached batches fix the batch layout
         if self._setup is not None and self._setup['nocc'] >= nocc:
             st = self._setup
             need = (st['nao_pair'] * st['batch_size'] + self.mol.nao ** 2 * st['blksize'] * 3) * 8 \
@@ -79,6 +86,7 @@ class DirectDFK:
             if get_avail_mem() > 1.1 * need:
                 return st
             self._setup = None                 # less free memory than at planning time: re-plan the batches
+        self._icache = {}
         cp.get_default_memory_pool().free_all_blocks()
         opt = self.opt
         nao = self.mol.nao      # sorted, decontracted, cartesian
@@ -87,7 +95,7 @@ class DirectDFK:
         nao_pair = len(pair_addresses)
         naux = self.auxmol.nao
         mem = get_avail_mem(exclude_memory_pool=True)
-        mem_avail = mem - naux * nocc ** 2 * 8 * 2 - nao ** 2 * 8 * 2
+        mem_avail = mem - naux * nocc ** 2 * 8 * 2 - nao ** 2 * 8 * 2 - self.cache_bytes
         batch_size = max(1, min(naux, int(mem_avail * self.mem_frac / (nao_pair * 8))))
         eval_j3c, aux_sorting, _, aux_offsets = opt.int3c2e_evaluator(
             aux_batch_size=batch_size, reorder_aux=True, cart=True,
@@ -106,6 +114,26 @@ class DirectDFK:
                            aux_coef=aux_coef, naux=naux)
         return self._setup
 
+    def _batch(self, st, kbatch, buf):
+        '''compressed integrals [nao_pair, nb] of aux batch kbatch: from the cache, or evaluated (and cached when the
+        budget allows)'''
+        c = self._icache.get(kbatch)
+        if c is not None:
+            return c
+        t0 = self._t(None, None)
+        compressed = st['eval_j3c'](aux_batch_id=kbatch, out=buf)
+        self._t('int3c2e', t0)
+        used = sum(a.nbytes for a in self._icache.values())
+        if used + compressed.nbytes <= self.cache_bytes:
+            compressed = self._icache[kbatch] = compressed.copy()
+        return compressed
+
+    def cached_fraction(self):
+        st = self._setup
+        if st is None:
+            return 0.
+        return len(self._icache) / max(1, len(st['aux_offsets']) - 1)
+
     def _blocks(self, st):
         '''yield (aux0, aux1, j3c [nao, nao, dk]) over all aux functions (raw integrals, sorted cart AOs)'''
         nao = self.mol.nao
@@ -115,9 +143,7 @@ class DirectDFK:
         i_addr, j_addr = st['i_addr'], st['j_addr']
         aux1 = 0
         for kbatch in range(len(st['aux_offsets']) - 1):
-            t0 = self._t(None, None)
-            compressed = st['eval_j3c'](aux_batch_id=kbatch, out=buf)
-            t0 = self._t('int3c2e', t0)
+            compressed = self._batch(st, kbatch, buf)
             nb = compressed.shape[1]
             for k0, k1 in lib.prange(0, nb, blk):
                 dk = k1 - k0
@@ -134,9 +160,7 @@ class DirectDFK:
         aux1 = 0
         buf = cp.empty((st['nao_pair'] * st['batch_size']))
         for kbatch in range(len(st['aux_offsets']) - 1):
-            t0 = self._t(None, None)
-            compressed = st['eval_j3c'](aux_batch_id=kbatch, out=buf)
-            self._t('int3c2e (J sweep)', t0)
+            compressed = self._batch(st, kbatch, buf)
             aux0, aux1 = aux1, aux1 + compressed.shape[1]
             yield aux0, aux1, compressed
 

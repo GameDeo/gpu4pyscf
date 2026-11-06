@@ -87,6 +87,7 @@ DEFAULTS = dict(
                                   # blocks are stored FP16 (rounding of the AO values themselves is structured)
     occ_k=True,                   # stored exact K as K C_occ (X = B C, T = C^T X, KC = X T); T reused for the gradient fit
     exact_k='auto',               # 'stored': DF tensors in memory; 'direct': two streamed integral passes per outer;
+                                  # 'cached': direct passes with a device cache of the raw integrals (fills the budget);
                                   # 'auto': direct when the stored FP64 tensors would exceed 45 % of the GPU memory
     direct_nmod=(15, 11),         # INT8-CRT moduli of the direct passes (pass 1 is amplified by J^-1); None: FP64
     inner_eig='auto',             # 'full': diagonalise every inner cycle; 'rotate': preconditioned occupied-subspace
@@ -666,6 +667,20 @@ def kernel(mf, dm0=None, **kwargs):
         from gpu4pyscf.lib.cupy_helper import get_avail_mem as _gam
         free = _gam()                      # free device memory incl. the cached pool blocks
         lr_direct = False                  # 'mixed': FR tensor stored, LR operator direct
+        cache_budget = None
+        if opt['exact_k'] == 'cached':
+            # one algorithm at every size: streamed direct passes whose raw 3c integrals are cached on the device up to
+            # the budget left after the surrogates and the work space (no stored DF tensor, no host memory)
+            opt['exact_k'] = 'direct'
+            if not no_k:
+                from pyscf.df import addons as _ad
+                df_ = mf.with_df
+                if getattr(df_, 'intopt', None) is None:
+                    df_.build(build_cderi=False)
+                npr = len(df_.intopt.pair_and_diag_indices()[0])
+                sur = 4. * npr * (_ad.make_auxmol(mol, opt['surrogate_aux']).nao_nr() +
+                                  _ad.make_auxmol(mol, opt['surrogate_j_aux']).nao_nr())
+                cache_budget = max(0., free - max(4e9, 0.3 * free) - sur) / (2 if omega != 0 else 1)
         if opt['exact_k'] == 'auto':
             plan = _plan_storage(mf, opt, omega, free, no_k)
             opt['exact_k'], exact_on_host, lr_host, lr_direct = plan['mode'], plan['f32'], plan['lr_host'], \
@@ -693,6 +708,11 @@ def kernel(mf, dm0=None, **kwargs):
                 dk_fr = DirectDFK(mol, mf.with_df.auxmol, None, nmod_t=nm[0], nmod_x=nm[1])
             if omega != 0:
                 dk_lr = DirectDFK(mol, mf.with_df.auxmol, omega, nmod_t=nm[0], nmod_x=nm[1])
+            if cache_budget:
+                for d_ in (dk_fr, dk_lr):
+                    if d_ is not None:
+                        d_.cache_bytes = cache_budget
+                log.info('multi-fidelity: direct passes with %.2f GB integral cache per operator', cache_budget / 1e9)
         g_cheap = g_nlc_cheap = None
         if opt['schedule']:
             g_cheap = _grid(mol, opt['cheap_grid'], mf.grids) if opt['cheap_grid'] else mf.grids
@@ -931,6 +951,8 @@ def kernel(mf, dm0=None, **kwargs):
                     if omega != 0:
                         Wk += (alpha - hyb) * dk_lr.kc_j(Cw, with_j=False, keep_fit=kf)[0]
                     Wk /= np.sqrt(2.0)
+                    log.info('    direct K: integral cache holds %.0f %% of the aux batches',
+                             100 * dk_fr.cached_fraction())
                 elif opt['occ_k']:
                     # K(D) C_occ directly (no nao^2 K matrix); keeps T = C^T B C for the gradient fit
                     from gpu4pyscf.df.df_jk import get_kc_occ
