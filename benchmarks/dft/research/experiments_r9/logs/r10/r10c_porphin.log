@@ -1,0 +1,268 @@
+CASE Mg_Porphin wb97m-v/def2-tzvp nao=848  ref FP64 tight: SCF 0.0 s GRAD 0.0 s conv True
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+small_rho_cutoff = 0
+<class 'gpu4pyscf.df.df_jk.DFRKS'> does not have attributes  mixed_precision multifidelity
+multi-fidelity: storage plan stored (npairs 278104 naux 2136: exact 4.75 GB x 2, surrogates dense 6.96 / f32 3.03 GB; budget device 10.7 GB host 7.6 GB) f32-surrogates LR-on-host
+multi-fidelity: exact_k=stored inc_store=f32 inc_filter=0 ref_k=surrogate
+Initial guess from minao
+multi-fidelity: stage 1 8 cycles, |g| = 6.80e-04
+multi-fidelity: outer 0 (exact)  E = -1188.506339477375  |g| = 2.506e-02
+    diag: stage-1 model error |g| by term: J 5.208e-03  K 2.194e-02  XC 6.867e-03  VV10 4.369e-03
+    inner cycles 6  |g_s| = 2.11e-05
+    model energy of the next density -1188.506403262592
+    diag: |g| of the VV10 change since the last checkpoint 1.760e-05
+multi-fidelity: outer 1 (exact)  E = -1188.506403320479  |g| = 9.269e-05
+    model energy error 5.789e-08 (0.12 g_prev g = 2.8e-07)
+    inner cycles 9  |g_s| = 8.01e-08
+    model energy of the next density -1188.506403321777
+    diag: |g| of the VV10 change since the last checkpoint 1.750e-07
+multi-fidelity: outer 2 (exact)  E = -1188.506403321787  |g| = 1.014e-05
+    model energy error 9.777e-12 (0.12 g_prev g = 1.1e-10)
+multi-fidelity SCF: E = -1188.506403321787  converged = True  outer 3 inner 15 stage1 8
+converged SCF energy = -1188.50640332179
+
+
+******** <class 'gpu4pyscf.df.grad.rks.Gradients'> for <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+unit = Eh/Bohr
+max_memory 14000 MB (current use 3471 MB)
+--------------- DFRKS gradients ---------------
+         x                y                z
+0 C    -0.0450019575     0.0255000855     0.0108476585
+1 C     0.0428642381    -0.0162792968     0.0025502672
+2 C     0.0420839376    -0.0180808684     0.0028821088
+3 C    -0.0487531210     0.0128265935    -0.0159791731
+4 H    -0.0004600400     0.0075350187     0.0004038426
+5 H    -0.0050298141    -0.0050067161    -0.0008141771
+6 C     0.0381442186     0.0178790550     0.0273514577
+7 H    -0.0094030762    -0.0037091217     0.0048872090
+8 C     0.0178845232    -0.0413976141    -0.0235934637
+9 H    -0.0037085068     0.0088610730    -0.0062085407
+10 C    -0.0239624004    -0.0457341834    -0.0123138800
+11 C    -0.0132967098    -0.0483321361     0.0154477516
+12 C     0.0179790541     0.0421456407    -0.0011615328
+13 H     0.0049088238    -0.0046178652     0.0009412045
+14 C     0.0162425351     0.0429994555    -0.0008243436
+15 N     0.0047553666     0.0101158871    -0.0002960253
+16 N     0.0106526676    -0.0041214051     0.0001822481
+17 H    -0.0073830165    -0.0004423534    -0.0012276743
+18 C     0.0125017714     0.0496775780     0.0115720661
+19 C    -0.0178293680    -0.0422037648     0.0016629788
+20 N    -0.0049816428    -0.0102496085     0.0004722262
+21 C    -0.0162235645    -0.0429413441     0.0021351117
+22 H    -0.0049990661     0.0050316198     0.0001953565
+23 C     0.0250592336     0.0443553257    -0.0149287549
+24 H     0.0074916333     0.0003922010    -0.0007129626
+25 C    -0.0401804896    -0.0152855636     0.0258534874
+26 H     0.0088827357     0.0041437671     0.0052951285
+27 C     0.0497688635    -0.0141223778    -0.0106827259
+28 C    -0.0421342113     0.0181589084    -0.0022862796
+29 N    -0.0105722672     0.0041450849    -0.0011838184
+30 C    -0.0429986287     0.0160269771    -0.0024261497
+31 H     0.0051615696     0.0049482233    -0.0009107273
+32 C     0.0437495468    -0.0241928111     0.0167540100
+33 H     0.0003333005    -0.0074072590     0.0011368159
+34 C    -0.0160697344     0.0393339597    -0.0289997242
+35 H     0.0043589424    -0.0099041019    -0.0045758834
+36 Mg     0.0001685854    -0.0000691373    -0.0014465931
+----------------------------------------------
+   peak host RSS 3.39 GB
+RESULT Mg_Porphin wb97m-v/def2-tzvp nao=848             {}                           dE -5.8e-10  max|dg| 2.7e-07  SCF 45.87 GRAD 12.35 total 58.22 conv True outer 3
+   model-energy error vs next exact ['5.8e-08', '9.8e-12']
+   cycles {'stage1': 8, 'inner': 15, 'outer': 3} outer |g| ['2.5e-02', '9.3e-05', '1.0e-05']
+     K exact                   9.17 s    3
+     DF build                  7.58 s    1
+     K_s inc                   4.80 s   15
+     xc_fine+grad              4.05 s    1
+     xc_fine                   3.70 s    2
+     xc_coarse inc             2.30 s   15
+     nlc_fine                  2.18 s    3
+     K_s stage1                2.12 s    9
+     eig                       1.71 s   23
+     xc_coarse                 1.23 s    4
+     xc_coarse32               1.14 s    8
+     diis                      0.85 s   23
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+small_rho_cutoff = 0
+multi-fidelity: storage plan stored (npairs 278104 naux 2136: exact 4.75 GB x 2, surrogates dense 6.96 / f32 3.03 GB; budget device 10.5 GB host 7.5 GB) f32-surrogates LR-on-host
+multi-fidelity: exact_k=stored inc_store=f32 inc_filter=0 ref_k=surrogate
+Initial guess from minao
+multi-fidelity: stage 1 8 cycles, |g| = 6.78e-04
+multi-fidelity: outer 0 (exact)  E = -1188.506339473476  |g| = 2.506e-02
+    diag: stage-1 model error |g| by term: J 5.208e-03  K 2.194e-02  XC 6.867e-03  VV10 4.369e-03
+    inner cycles 6  |g_s| = 2.11e-05
+    model energy of the next density -1188.506403266992
+    diag: |g| of the VV10 change since the last checkpoint 1.761e-05
+Traceback (most recent call last):
+  File "/content/src/gpu4pyscf/benchmarks/dft/research/experiments_r9/r9_general.py", line 75, in <module>
+    e, g, ts, tg, cv = run(mf)
+                       ~~~^^^^
+  File "/content/src/gpu4pyscf/benchmarks/dft/research/experiments_r9/r9_general.py", line 42, in run
+    e = mf.kernel()
+  File "/content/src/gpu4pyscf/gpu4pyscf/scf/hf.py", line 417, in scf
+    multifidelity.kernel(mf, dm0, **kwargs)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/scf/multifidelity.py", line 948, in kernel
+    kc, t_lr = get_kc_occ(d_lr, Cw, keep_t=True, omega=omega)
+               ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/df/df_jk.py", line 737, in get_kc_occ
+    X, P1 = crt_gemm.gemm_planes(view, ct, nmod)               # rows (i, L), cols k
+            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/lib/crt_gemm.py", line 386, in gemm_planes
+    matmul_operands(oa, ob, out)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/content/src/gpu4pyscf/gpu4pyscf/lib/crt_gemm.py", line 338, in matmul_operands
+    C = cupy.empty((n, oa.rp, ob.rp), dtype=cupy.int32)
+  File "/usr/local/lib/python3.13/dist-packages/cupy/_creation/basic.py", line 34, in empty
+    return cupy.ndarray(shape, dtype, order=order)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "cupy/_core/core.pyx", line 175, in cupy._core.core.ndarray.__new__
+  File "cupy/_core/core.pyx", line 279, in cupy._core.core._ndarray_base._init
+  File "cupy/cuda/memory.pyx", line 877, in cupy.cuda.memory.alloc
+  File "/content/src/gpu4pyscf/gpu4pyscf/lib/cupy_helper.py", line 1261, in malloc
+    return cuda_malloc(size)
+  File "cupy/cuda/memory.pyx", line 742, in cupy.cuda.memory._malloc
+  File "cupy/cuda/memory.pyx", line 743, in cupy.cuda.memory._malloc
+  File "cupy/cuda/memory.pyx", line 117, in cupy.cuda.memory.Memory.__init__
+  File "cupy_backends/cuda/api/runtime.pyx", line 520, in cupy_backends.cuda.api.runtime.malloc
+  File "cupy_backends/cuda/api/runtime.pyx", line 146, in cupy_backends.cuda.api.runtime.check_status
+cupy_backends.cuda.api.runtime.CUDARuntimeError: cudaErrorMemoryAllocation: out of memory
+   FAIL {'inner_nlc_grid': (20, 50)} CUDARuntimeError('cudaErrorMemoryAllocation: out of memory')
+
+
+******** <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+method = DFRKS
+initial guess = minao
+damping factor = None
+level_shift factor = None
+DIIS = <class 'gpu4pyscf.scf.diis.CDIIS'>
+diis_start_cycle = 1
+diis_space = 8
+diis_damp = 0
+SCF conv_tol = 1e-09
+SCF conv_tol_grad = None
+SCF max_cycles = 50
+direct_scf = False
+XC library gpu4pyscf.dft.libxc version 7.1.2 (CUDA)
+    unable to decode the reference due to https://github.com/NVIDIA/cuda-python/issues/29
+XC functionals = wb97m-v
+** Following is NLC and NLC Grids **
+NLC functional = wb97m-v
+small_rho_cutoff = 0
+multi-fidelity: storage plan stored (npairs 278104 naux 2136: exact 4.75 GB x 2, surrogates dense 6.96 / f32 3.03 GB; budget device 10.5 GB host 7.5 GB) f32-surrogates LR-on-host
+multi-fidelity: exact_k=stored inc_store=f32 inc_filter=0 ref_k=surrogate
+Initial guess from minao
+multi-fidelity: stage 1 8 cycles, |g| = 6.82e-04
+multi-fidelity: outer 0 (exact)  E = -1188.506339475811  |g| = 2.506e-02
+    diag: stage-1 model error |g| by term: J 5.208e-03  K 2.194e-02  XC 6.867e-03  VV10 4.369e-03
+    inner cycles 6  |g_s| = 2.12e-05
+    model energy of the next density -1188.506403293428
+    diag: |g| of the VV10 change since the last checkpoint 1.769e-05
+multi-fidelity: outer 1 (exact)  E = -1188.506403320680  |g| = 9.271e-05
+    model energy error 2.725e-08 (0.12 g_prev g = 2.8e-07)
+    inner cycles 9  |g_s| = 7.92e-08
+    model energy of the next density -1188.506403321929
+    diag: |g| of the VV10 change since the last checkpoint 1.560e-07
+multi-fidelity: outer 2 (exact)  E = -1188.506403321821  |g| = 1.009e-05
+    model energy error -1.078e-10 (0.12 g_prev g = 1.1e-10)
+multi-fidelity SCF: E = -1188.506403321821  converged = True  outer 3 inner 15 stage1 8
+converged SCF energy = -1188.50640332182
+
+
+******** <class 'gpu4pyscf.df.grad.rks.Gradients'> for <class 'gpu4pyscf.df.df_jk.DFRKS'> ********
+unit = Eh/Bohr
+max_memory 14000 MB (current use 3511 MB)
+--------------- DFRKS gradients ---------------
+         x                y                z
+0 C    -0.0450019481     0.0255000922     0.0108476650
+1 C     0.0428642309    -0.0162793040     0.0025502642
+2 C     0.0420839380    -0.0180808573     0.0028821097
+3 C    -0.0487531157     0.0128265779    -0.0159791703
+4 H    -0.0004600391     0.0075350189     0.0004038428
+5 H    -0.0050298129    -0.0050067157    -0.0008141767
+6 C     0.0381442079     0.0178790672     0.0273514541
+7 H    -0.0094030754    -0.0037091215     0.0048872097
+8 C     0.0178844978    -0.0413976204    -0.0235934648
+9 H    -0.0037085072     0.0088610730    -0.0062085409
+10 C    -0.0239623804    -0.0457341829    -0.0123138736
+11 C    -0.0132966897    -0.0483321433     0.0154477655
+12 C     0.0179790493     0.0421456405    -0.0011615295
+13 H     0.0049088226    -0.0046178637     0.0009412044
+14 C     0.0162425331     0.0429994507    -0.0008243425
+15 N     0.0047553507     0.0101158941    -0.0002960353
+16 N     0.0106526721    -0.0041214029     0.0001822431
+17 H    -0.0073830163    -0.0004423536    -0.0012276746
+18 C     0.0125017977     0.0496775732     0.0115720590
+19 C    -0.0178293733    -0.0422037676     0.0016629791
+20 N    -0.0049816620    -0.0102496076     0.0004722366
+21 C    -0.0162235642    -0.0429413509     0.0021351075
+22 H    -0.0049990655     0.0050316195     0.0001953570
+23 C     0.0250592531     0.0443553322    -0.0149287627
+24 H     0.0074916322     0.0003922009    -0.0007129620
+25 C    -0.0401804971    -0.0152855519     0.0258534911
+26 H     0.0088827337     0.0041437671     0.0052951305
+27 C     0.0497688684    -0.0141223856    -0.0106827273
+28 C    -0.0421342068     0.0181589195    -0.0022862834
+29 N    -0.0105722685     0.0041450812    -0.0011838091
+30 C    -0.0429986375     0.0160269671    -0.0024261462
+31 H     0.0051615693     0.0049482235    -0.0009107267
+32 C     0.0437495687    -0.0241927939     0.0167540102
+33 H     0.0003333002    -0.0074072581     0.0011368156
+34 C    -0.0160697575     0.0393339396    -0.0289997281
+35 H     0.0043589422    -0.0099041015    -0.0045758843
+36 Mg     0.0001685884    -0.0000691378    -0.0014465963
+----------------------------------------------
+   peak host RSS 3.43 GB
+RESULT Mg_Porphin wb97m-v/def2-tzvp nao=848             {'inner_nlc': False}         dE -6.2e-10  max|dg| 3.0e-07  SCF 44.55 GRAD 12.11 total 56.67 conv True outer 3
+   model-energy error vs next exact ['2.7e-08', '-1.1e-10']
+   cycles {'stage1': 8, 'inner': 15, 'outer': 3} outer |g| ['2.5e-02', '9.3e-05', '1.0e-05']
+     K exact                   9.02 s    3
+     DF build                  7.87 s    1
+     K_s inc                   4.48 s   15
+     xc_fine+grad              4.01 s    1
+     xc_fine                   3.54 s    2
+     xc_coarse inc             2.15 s   15
+     nlc_fine                  2.13 s    3
+     K_s stage1                2.08 s    9
+     eig                       1.69 s   23
+     xc_coarse                 1.17 s    4
+     xc_coarse32               1.12 s    8
+     diis                      0.87 s   23
+ALLDONE

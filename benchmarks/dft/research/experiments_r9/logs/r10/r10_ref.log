@@ -1,0 +1,4 @@
+CASE Mg_Porphin wb97m-v/def2-tzvp nao=848  ref FP64 tight: SCF 512.7 s GRAD 38.8 s conv True
+CASE Bisphenol_A wb97m-v/def2-tzvp nao=623  ref FP64 tight: SCF 268.9 s GRAD 18.4 s conv True
+CASE Penicillin_V b3lyp/def2-tzvp nao=858  ref FP64 tight: SCF 213.6 s GRAD 16.9 s conv True
+ALLDONE
