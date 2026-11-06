@@ -848,6 +848,7 @@ def kernel(mf, dm0=None, **kwargs):
 
         # ---------------------------------------------------------------- outer/inner
         hist = []
+        e_models = []
         diag_prev = {}
         e_tot = None
         mf._mf_xc_grad = None
@@ -956,6 +957,9 @@ def kernel(mf, dm0=None, **kwargs):
             gt = proj_grad(Wt, Co) if Sinv is not None else 2 * float(cupy.linalg.norm(C[:, nocc:].T @ Wt))
             hist.append((gt, e_tot))
             log.info('multi-fidelity: outer %d (%s)  E = %.12f  |g| = %.3e', outer, level, e_tot, gt)
+            if len(hist) >= 2 and len(e_models) == len(hist) - 1:
+                log.info('    model energy error %.3e (0.12 g_prev g = %.1e)', e_models[-1] - e_tot,
+                         0.12 * hist[-2][0] * gt)
             if opt.get('diag') and outer == 0 and Sinv is not None:
                 # model error at the stage-1 exit, term by term (exact minus stage-1 operator, projected gradient)
                 Wn = diag_prev.get('Wnlc', 0. * Co)
@@ -994,6 +998,7 @@ def kernel(mf, dm0=None, **kwargs):
                     cx.set_ref(Co)
             Co_ref = Co
             f = hs + vc - 0.5 * vks_ref + Delta
+            f_ref0 = f
             Dref_tag = dm
             diis = new_diis()
             inner_tol = max(opt['inner_factor'] * gt, 0.3 * conv_tol_grad * opt['inner_factor'])
@@ -1032,6 +1037,13 @@ def kernel(mf, dm0=None, **kwargs):
                 if gs < inner_tol:
                     break
             log.info('    inner cycles %d  |g_s| = %.2e', it + 1, gs)
+            # model energy of the new density (trapezoid on the model Fock, exact on the occupied columns at D_ref):
+            # E(D) ~ E(D_ref) + 1/2 tr[(F(D_ref) + F~(D)) (D - D_ref)]; checked against the next exact checkpoint
+            dD = dm - Dref_tag
+            e_model = e_tot + 0.5 * float(cupy.einsum('ij,ji->', f_ref0 + f, dD))
+            e_models.append(e_model)
+            log.info('    model energy of the next density %.12f', e_model)
+            dD = f_ref0 = None
 
     # canonical occupied orbitals of the exact operator; virtuals from the surrogate
     Co = C[:, :nocc]
@@ -1106,7 +1118,7 @@ def kernel(mf, dm0=None, **kwargs):
     _ch.pinned_memory_pool.free_all_blocks()
     cupy.get_default_pinned_memory_pool().free_all_blocks()
     mf.converged = hist[-1][0] < conv_tol_grad and levels[-1] == 'exact'
-    mf.multifidelity_stats = dict(cycles=ncyc, outer_hist=hist, timers=tim.t, levels=levels,
+    mf.multifidelity_stats = dict(cycles=ncyc, outer_hist=hist, e_models=e_models, timers=tim.t, levels=levels,
                                   wall=time.perf_counter() - t_start, conv_tol_grad=conv_tol_grad)
     mf.cycles = ncyc['inner'] + ncyc['stage1']
     log.note('multi-fidelity SCF: E = %.12f  converged = %s  outer %d inner %d stage1 %d',

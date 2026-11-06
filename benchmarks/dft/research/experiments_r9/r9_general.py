@@ -85,7 +85,10 @@ for xyz, xc, basis, variants in cases:
             tag, str(v), e - e0, dg, ts, tg, ts + tg, cv, len(st.get('outer_hist', []))), flush=True)
         rec['runs'].append(dict(v=str(v), dE=e - e0, dg=dg, t_scf=ts, t_grad=tg, conv=cv))
         if st:
-            print('   cycles', st.get('cycles'), 'outer |g|', ['%.1e' % g_ for g_, _ in st.get('outer_hist', [])], flush=True)
+            em, oh = st.get('e_models', []), st.get('outer_hist', [])
+            if em:
+                print('   model-energy error vs next exact', ['%.1e' % (em[i] - oh[i + 1][1]) for i in range(min(len(em), len(oh) - 1))], flush=True)
+            print('   cycles', st.get('cycles'), 'outer |g|', ['%.1e' % h_[0] for h_ in st.get('outer_hist', [])], flush=True)
             for k, (s_, n_) in sorted(st['timers'].items(), key=lambda kv: -kv[1][0])[:12]:
                 print(f'     {k:22s} {s_:7.2f} s {n_:4d}', flush=True)
     out.append(rec)
